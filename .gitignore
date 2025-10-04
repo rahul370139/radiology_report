@@ -44,3 +44,7 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+
+# Embedded repositories
+FastChat/
+LLaVA-Med/
