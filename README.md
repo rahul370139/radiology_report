@@ -49,6 +49,12 @@ This project trains a vision-language model to generate radiology reports from c
 - **Count**: 4 sample radiology reports
 - **Purpose**: Reference examples of original MIMIC-CXR reports
 
+### Sample Images
+- **Location**: `src/data/sample_images/`
+- **Count**: 3 sample chest X-ray images
+- **Size**: ~5.6 MB total (1.5-2.2 MB each)
+- **Purpose**: Sample images for testing and demonstration
+
 ### Data Quality & Deduplication
 - **Original Dataset**: 9,638 samples
 - **Final Clean Dataset**: 5,644 samples

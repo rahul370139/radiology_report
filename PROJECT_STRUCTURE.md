@@ -63,11 +63,16 @@ radiology_report/
     │   ├── phaseA_manifest.jsonl               # Phase A manifest
     │   └── chexpert_dict.json                  # CheXpert labels
     │
-    └── raw_reports/                   # Sample raw reports
-        ├── sample_report_1.txt        # Sample radiology report 1
-        ├── sample_report_2.txt        # Sample radiology report 2
-        ├── sample_report_3.txt        # Sample radiology report 3
-        └── sample_report_4.txt        # Sample radiology report 4
+    ├── raw_reports/                   # Sample raw reports
+    │   ├── sample_report_1.txt        # Sample radiology report 1
+    │   ├── sample_report_2.txt        # Sample radiology report 2
+    │   ├── sample_report_3.txt        # Sample radiology report 3
+    │   └── sample_report_4.txt        # Sample radiology report 4
+    │
+    └── sample_images/                 # Sample chest X-ray images
+        ├── sample_xray_1.jpg          # Sample chest X-ray 1 (~1.5 MB)
+        ├── sample_xray_2.jpg          # Sample chest X-ray 2 (~1.7 MB)
+        └── sample_xray_3.jpg          # Sample chest X-ray 3 (~2.2 MB)
 │
 ├── docs/                              # Documentation
 │   ├── api/                           # API documentation
