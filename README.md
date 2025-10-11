@@ -3,12 +3,22 @@ Vision-Language Model with Curriculum Learning for Automated Radiology Report Ge
 
 ---
 
+## 🚀 **PROJECT STATUS: VALIDATION PHASE** 
+
+**Current Status**: Model training completed 100% of curriculum learning (424/424 Stage A batches + 179/179 Stage B batches). Currently running final validation phase on validation set.
+
+**Validation Phase**: Running comprehensive evaluation on 847 validation samples to assess model performance.
+
+**Key Achievement**: Successfully implemented advanced curriculum learning with 4,797 training samples and 847 validation samples.
+
+---
+
 ## 📊 Project Overview
 
 This project trains a vision-language model to generate radiology reports from chest X-ray images using curriculum learning with two stages:
 
-- **Stage A (35%)**: Image-only warm-up → learns to generate Impression + CheXpert labels
-- **Stage B (65%)**: Image+EHR training → adds clinical reasoning with patient context and ICD diagnoses
+- **Stage A (35%)**: Image-only warm-up → learns to generate Impression + CheXpert labels ✅ **COMPLETED**
+- **Stage B (65%)**: Image+EHR training → adds clinical reasoning with patient context and ICD diagnoses 🔄 **COMPLETED**
 
 **Key Innovation**: Single model, staged training, fair A/B testing (same model, EHR ON/OFF at inference).
 
@@ -16,50 +26,64 @@ This project trains a vision-language model to generate radiology reports from c
 
 ## 🎯 Datasets
 
-### Primary Training Data
+### Primary Training Data (FINAL CLEAN DATASET)
 | File | Size | Records | Purpose |
 |------|------|---------|---------|
-| `curriculum_train.jsonl` | 9.5 MB | 10,142 | **MAIN TRAINING DATA** |
-| `curriculum_val.jsonl` | 1.1 MB | 1,125 | **VALIDATION DATA** |
+| `curriculum_train_final_clean.jsonl` | 14.2 MB | 4,797 | **MAIN TRAINING DATA** |
+| `curriculum_val_final_clean.jsonl` | 2.5 MB | 847 | **VALIDATION DATA** |
 
 ### Reference Data
 | File | Size | Records | Purpose |
 |------|------|---------|---------|
-| `ehr_context.jsonl` | 2.2 MB | 5,441 | EHR reference (embedded in curriculum) |
-| `chexpert_dict.json` | 67.8 MB | 227,827 | Label lookup (embedded in curriculum) |
+| `chexpert_dict.json` | 67.8 MB | 227,827 | CheXpert labels mapping |
+| `impressions.jsonl` | 6.0 MB | 10,003 | Raw impressions (reference) |
+| `phaseA_manifest.jsonl` | 3.9 MB | 10,003 | Phase A manifest (reference) |
 
 ### Image Data
 - **Location**: `files/p10/`
 - **Count**: 10,003 chest X-ray JPG images
 - **Paths**: Already embedded in curriculum samples
 
+### Data Quality & Deduplication
+- **Original Dataset**: 9,638 samples
+- **Final Clean Dataset**: 5,644 samples
+- **Duplicates Removed**: 3,994 samples (41.4% waste eliminated)
+- **EHR Coverage**: 42.6% vitals, 94.1% labs (Stage B)
+
 ---
 
 ## 📚 Data Structure
 
-### Stage A: Image-Only (5,243 samples)
+### Stage A: Image-Only (959 samples)
 ```json
 {
-  "image": "files/p10/.../image.jpg",
-  "prompt": "Image:<image>\nAnswer Impression & CheXpert.",
-  "target": "Impression: ...\nCheXpert: {...}",
-  "mode": "image_only",
+  "image_path": "files/p10/.../image.jpg",
+  "impression": "1. APPROPRIATE POSITIONING...",
+  "chexpert_labels": {"Consolidation": -1, "Edema": 1, ...},
   "stage": "A"
 }
 ```
 
-### Stage B: Image+EHR (4,899 samples)
+### Stage B: Image+EHR (4,685 samples)
 ```json
 {
-  "image": "files/p10/.../image.jpg",
-  "prompt": "Patient Data: {Age, Sex, Vitals...}\nImage:<image>\nAnswer Impression, CheXpert & ICD.",
-  "target": "Impression: ...\nCheXpert: {...}\nICD: {...}",
-  "mode": "image_ehr",
+  "image_path": "files/p10/.../image.jpg",
+  "impression": "1. APPROPRIATE POSITIONING...",
+  "chexpert_labels": {"Consolidation": -1, "Edema": 1, ...},
+  "patient_data": {
+    "subject_id": 10020944,
+    "Age": 72,
+    "Sex": "M",
+    "Vitals": {"heart_rate": {...}, "o2_saturation": {...}},
+    "Labs": {"Sodium": {...}, "Creatinine": {...}},
+    "O2_device": "Oxygen_Device: 40",
+    "Chronic_conditions": []
+  },
   "stage": "B"
 }
 ```
 
-**Note**: Same images used twice (once for each stage) - this is intentional curriculum learning!
+**Note**: Each image used only once (deduplicated) - efficient curriculum learning!
 
 ---
 
@@ -115,11 +139,12 @@ radiology_report/
 │   ├── dataset.py               # Dataset handling
 │   ├── trainer.py               # Training logic
 │   └── metrics.py               # Evaluation metrics
-├── data/processed/              # Processed training data
-│   ├── curriculum_train.jsonl   # Main training data
-│   ├── curriculum_val.jsonl     # Validation data
-│   ├── ehr_context.jsonl        # EHR reference
-│   └── chexpert_dict.json       # Label lookup
+├── data/processed/                           # Processed training data
+│   ├── curriculum_train_final_clean.jsonl   # Main training data (4,797 samples)
+│   ├── curriculum_val_final_clean.jsonl     # Validation data (847 samples)
+│   ├── chexpert_dict.json                   # CheXpert labels mapping
+│   ├── impressions.jsonl                    # Raw impressions (reference)
+│   └── phaseA_manifest.jsonl                # Phase A manifest (reference)
 ├── files/p10/                   # Chest X-ray images (10,003 JPGs)
 ├── updates/                     # Project status updates
 │   ├── PROJECT_STATUS.md         # Quick status overview
@@ -179,9 +204,10 @@ Key packages:
 - **Mixed Precision**: FP16
 
 ### Curriculum Learning
-- **Stage A**: 5,243 samples (image-only)
-- **Stage B**: 4,899 samples (image+EHR)
-- **Total**: 10,142 training samples
+- **Stage A**: 959 samples (image-only)
+- **Stage B**: 4,685 samples (image+EHR)
+- **Total**: 5,644 training samples
+- **Deduplication**: 41.4% waste eliminated
 
 ---
 
@@ -210,11 +236,11 @@ Key packages:
 
 ### Remote Training Environment
 - **Hardware**: Apple M3 Ultra Mac Studio
-- **CPU**: 32 cores
+- **CPU**: 32 cores (Currently using CPU for stability)
 - **RAM**: 512 GB
 - **Storage**: 20 GB project data transferred
-- **Acceleration**: MPS (Metal Performance Shaders)
-- **Status**: ✅ Ready for training
+- **Acceleration**: CPU-optimized (MPS disabled for compatibility)
+- **Status**: ✅ **ACTIVE TRAINING**
 
 ### Data Transfer Status
 - **Images**: 10,003 chest X-rays (18 GB) ✅ Complete
@@ -222,27 +248,37 @@ Key packages:
 - **Code**: All training modules ✅ Complete
 - **Environment**: Python 3.9.6 + PyTorch 2.8.0 ✅ Complete
 
+### Training Progress
+- **Stage A**: 424/424 batches (100%) ✅ **COMPLETED**
+- **Stage B**: 179/179 batches (100%) ✅ **COMPLETED**
+- **Total Progress**: 100% training complete, now in validation phase
+
 ---
 
 ## 🚨 Current Status & Issues
 
-### ✅ Completed (95%)
+### ✅ Completed (100%)
 - **Infrastructure Setup**: Remote Apple M3 Ultra Mac Studio
 - **Data Processing**: Complete MIMIC-CXR dataset processing pipeline
-- **Training Data**: 10,142 training samples with curriculum learning
-- **Environment**: Python 3.9.6 + PyTorch 2.8.0 + MPS acceleration
+- **Training Data**: 4,797 clean training samples with curriculum learning
+- **Data Quality**: 41.4% duplicates removed, 42.6% vitals coverage, 94.1% labs coverage
+- **Environment**: Python 3.9.6 + PyTorch 2.8.0 + CPU optimization
 - **Code Transfer**: All essential files transferred to remote server
 - **Dependencies**: All packages installed and configured
+- **Stage A Training**: 424/424 batches completed (100%)
+- **Stage B Training**: 179/179 batches completed 100%)
 
-### ⚠️ Current Issues
-- **Compatibility**: transformers/PEFT version mismatch needs resolution
-- **Model Download**: LLaVA-Med model weights need to be downloaded
+### 🔄 **CURRENTLY IN VALIDATION PHASE**
+- **Stage B Training**: 179/179 batches completed (100%)
+- **Validation Set**: Running evaluation on 847 validation samples
+- **Performance Metrics**: Generating comprehensive evaluation report
+- **Status**: All training phases completed successfully
 
-### ⏳ Next Steps
-1. Fix transformers/PEFT compatibility issues
-2. Download LLaVA-Med model weights
-3. Run initial training test
-4. Begin fine-tuning process
+### ⏳ Final Steps
+1. Complete validation evaluation on 847 samples
+2. Generate performance metrics and evaluation report
+3. Deploy model for inference testing
+4. Prepare production deployment package
 
 ---
 
@@ -275,6 +311,6 @@ This project uses the MIMIC-CXR dataset, which requires institutional access and
 
 ---
 
-**Last Updated**: October 4, 2024  
-**Status**: 95% Complete - Ready for training  
+**Last Updated**: October 10, 2025  
+**Status**: 100% Training Complete - In Validation Phase  
 **Repository**: [https://github.com/rahul370139/radiology_report](https://github.com/rahul370139/radiology_report)

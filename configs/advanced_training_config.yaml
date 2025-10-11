@@ -1,0 +1,168 @@
+# Advanced Training Configuration for MIMIC-CXR Radiology Report Model
+# Implements advanced curriculum learning, class balancing, and JSON drift prevention
+
+# Model Configuration
+base_model: "microsoft/llava-med-v1.5-mistral-7b"
+model_type: "llava_mistral"
+
+# Data Configuration
+dataset_path: "data/processed/curriculum_train_final_clean.jsonl"
+validation_path: "data/processed/curriculum_val_final_clean.jsonl"
+image_root: "."
+
+# Advanced Curriculum Learning Configuration
+curriculum_learning: true
+stage_a_oversample_ratio: 0.5  # 50% Stage-A in early training
+synthetic_stage_a_ratio: 0.3   # 30% of Stage-B samples use empty EHR
+stage_split: 0.3               # Save checkpoint_A at 30% of steps
+stage_a_warmup_steps: 0.3      # First 30% steps focus on Stage-A
+
+# Class Balancing Configuration
+use_stratified_sampling: true
+rare_icd_boost: 2.0            # 2x sampling for rare ICDs
+chexpert_positive_boost: 1.5   # 1.5x sampling for positive CheXpert labels
+
+# JSON Drift Prevention
+json_constrained_output: true
+json_repair_enabled: true
+json_schema_validation: true
+max_new_tokens: 384
+temperature: 0.2
+top_p: 0.9
+do_sample: false
+
+# Training Configuration
+epochs: 1.2                    # Short epochs to prevent overfitting
+batch_size: 2                  # Per device batch size
+gradient_accumulation_steps: 16 # Effective batch size = 2 * 16 = 32
+learning_rate: 5.0e-5
+warmup_ratio: 0.05             # 5% warmup
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+# LoRA Configuration
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - "q_proj"
+  - "v_proj"
+  - "k_proj"
+  - "o_proj"
+  - "gate_proj"
+  - "up_proj"
+  - "down_proj"
+  # Note: mm_projector is a Sequential module, not supported by LoRA
+  # We'll train it fully instead
+
+# Precision & Performance
+bf16: false                    # Not supported on macOS MPS
+fp16: false                    # Not supported on macOS MPS either
+tf32: false
+
+# Checkpointing
+save_strategy: "steps"
+save_steps: 10                 # Save every 10 steps to prevent progress loss
+save_total_limit: 3
+checkpoint_dir: "checkpoints"
+resume_from_checkpoint: null
+
+# Logging
+logging_dir: "logs"
+logging_steps: 10
+log_level: "info"
+report_to: "tensorboard"
+
+# Evaluation
+evaluation_strategy: "steps"
+eval_steps: 100
+eval_accumulation_steps: 1
+per_device_eval_batch_size: 2
+
+# Early Stopping
+early_stopping_patience: 3
+early_stopping_threshold: 0.001
+
+# Image Processing
+image_size: 336
+vision_feature_select_strategy: "default"
+
+# Device & Distributed Training
+device: "cpu"
+local_rank: -1
+ddp_find_unused_parameters: false
+
+# Optimization
+optim: "adamw_torch"
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_epsilon: 1.0e-8
+
+# Data Loading
+dataloader_num_workers: 0        # Disable multiprocessing to avoid pickling issues
+dataloader_pin_memory: false
+remove_unused_columns: false
+
+# Other
+seed: 42
+gradient_checkpointing: true
+dataloader_drop_last: false
+
+# Output
+output_dir: "checkpoints"
+overwrite_output_dir: false
+
+# Stage Checkpoints
+checkpoint_a_name: "checkpoint_A"
+checkpoint_b_name: "checkpoint_B"
+
+# Advanced Metrics
+metrics:
+  - "loss"
+  - "bleu4"
+  - "rouge_l"
+  - "chexpert_f1"
+  - "chexpert_accuracy"
+  - "icd_f1"
+  - "icd_accuracy"
+  - "json_validity"
+  - "macro_f1"
+  - "micro_f1"
+
+# Curriculum Mixing Strategy
+curriculum_mixing:
+  steps_0_30:
+    stage_a_ratio: 0.5
+    synthetic_stage_a_ratio: 0.3
+    description: "Stage-A heavy with synthetic boost"
+  steps_30_100:
+    stage_a_ratio: 0.2
+    synthetic_stage_a_ratio: 0.1
+    description: "Stage-B dominant with some image-only"
+
+# ICD Classes for Stratified Sampling
+icd_classes:
+  - "Pneumonia (J18.x)"
+  - "Pleural_Effusion (J90)"
+  - "Pneumothorax (J93.x)"
+  - "Pulmonary_Edema (J81.x)"
+  - "Cardiomegaly (I51.7)"
+  - "Atelectasis (J98.1)"
+  - "Pulmonary_Embolism (I26.x)"
+  - "Rib_Fracture (S22.x)"
+
+# CheXpert Labels for Balancing
+chexpert_labels:
+  - "Consolidation"
+  - "Edema"
+  - "Enlarged Cardiomediastinum"
+  - "Fracture"
+  - "Lung Lesion"
+  - "Lung Opacity"
+  - "No Finding"
+  - "Pleural Effusion"
+  - "Pleural Other"
+  - "Pneumonia"
+  - "Pneumothorax"
+  - "Support Devices"

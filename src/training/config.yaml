@@ -1,0 +1,117 @@
+# Training Configuration for MIMIC-CXR Radiology Report Model
+# Single LoRA run with curriculum learning (Stage A → Stage B)
+
+# Model Configuration
+base_model: "microsoft/llava-med-v1.5-mistral-7b"  # Medical LLaVA-Med (Mistral-7B backbone)
+# Pre-trained on 1M chest X-ray pairs - best for medical imaging
+# Benefits:
+# - Domain-specific (radiology/medical imaging)
+# - Mistral-7B backbone (better JSON stability than Vicuna)
+# - Apache 2.0 license (commercial-friendly)
+# - Converts cleanly to GGUF for Ollama deployment
+model_type: "llava_mistral"  # Model architecture type
+
+# Data Configuration
+dataset_path: "data/processed/curriculum_train_final_clean.jsonl"
+validation_path: "data/processed/curriculum_val_final_clean.jsonl"
+image_root: "."  # Root directory for image paths (relative to project root)
+
+# Training Configuration
+epochs: 2
+batch_size: 2  # Per device batch size
+gradient_accumulation_steps: 8  # Effective batch size = 2 * 8 = 16
+learning_rate: 5.0e-5
+warmup_ratio: 0.03
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+# LoRA Configuration
+use_lora: true
+lora_r: 16  # LoRA rank
+lora_alpha: 32  # LoRA alpha (typically 2 * lora_r)
+lora_dropout: 0.05
+lora_target_modules:
+  - "q_proj"
+  - "v_proj"
+  - "k_proj"
+  - "o_proj"
+  - "gate_proj"
+  - "up_proj"
+  - "down_proj"
+  - "mm_projector"  # Image-to-text projection layer (critical for vision models)
+
+# Curriculum Learning Configuration
+stage_split: 0.35  # Save checkpoint_A at 35% of total steps (Stage A→B transition)
+skip_ehr_during_warmup: true  # Skip image+EHR samples during Stage A
+
+# Precision & Performance
+bf16: false  # bf16 can be flaky on MPS
+fp16: true   # Use fp16 for MPS compatibility
+tf32: false  # TF32 has no effect on Apple GPUs
+
+# Checkpointing
+save_strategy: "steps"
+save_steps: 0.35  # Save at stage split
+save_total_limit: 3  # Keep last 3 checkpoints
+checkpoint_dir: "checkpoints"
+resume_from_checkpoint: null  # Set to checkpoint path to resume
+
+# Logging
+logging_dir: "logs"
+logging_steps: 10
+log_level: "info"
+report_to: "tensorboard"  # Use tensorboard for logging
+
+# Evaluation
+evaluation_strategy: "steps"
+eval_steps: 100
+eval_accumulation_steps: 1
+per_device_eval_batch_size: 2
+
+# Generation (for inference/evaluation)
+max_new_tokens: 512
+temperature: 0.1  # Low temperature for more deterministic outputs
+top_p: 0.9
+do_sample: false  # Greedy decoding for evaluation
+
+# Image Processing
+image_size: 336  # Input image size for vision encoder
+vision_feature_select_strategy: "default"
+
+# Device & Distributed Training
+device: "auto"  # Auto-detect CUDA/MPS/CPU
+local_rank: -1  # Set by accelerate/deepspeed
+ddp_find_unused_parameters: false
+
+# Optimization
+optim: "adamw_torch"
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_epsilon: 1.0e-8
+
+# Data Loading
+dataloader_num_workers: 2  # Start with 2 on macOS (reduce fork issues)
+dataloader_pin_memory: false  # pin_memory is CUDA-only
+remove_unused_columns: false
+
+# Other
+seed: 42
+gradient_checkpointing: true  # Save memory
+dataloader_drop_last: false
+
+# Output
+output_dir: "checkpoints"
+overwrite_output_dir: false
+
+# Stage Checkpoints
+checkpoint_a_name: "checkpoint_A"  # Stage A checkpoint name
+checkpoint_b_name: "checkpoint_B"  # Final checkpoint name (Stage B)
+
+# Metrics to track
+metrics:
+  - "loss"
+  - "bleu4"
+  - "rouge_l"
+  - "chexpert_f1"
+  - "json_validity"
+
