@@ -53,18 +53,21 @@ radiology_report/
 │   └── deployment/                    # Deployment scripts
 │       └── deploy_to_server.py       # Server deployment
 │
-├── data/                              # Data directory
-│   ├── processed/                     # Processed datasets
-│   │   ├── curriculum_train_final_clean.jsonl  # Main training data
-│   │   ├── curriculum_val_final_clean.jsonl    # Validation data
-│   │   ├── sample_curriculum_train.jsonl       # Sample training data
-│   │   ├── sample_curriculum_val.jsonl         # Sample validation data
-│   │   ├── impressions.jsonl                   # Raw impressions
-│   │   ├── phaseA_manifest.jsonl               # Phase A manifest
-│   │   └── chexpert_dict.json                  # CheXpert labels
-│   │
-│   └── raw/                           # Raw data (not in git)
-│       └── files/p10/                 # Chest X-ray images
+└── src/data/                          # Data directory
+    ├── processed/                     # Processed datasets (mirror)
+    │   ├── curriculum_train_final_clean.jsonl  # Main training data
+    │   ├── curriculum_val_final_clean.jsonl    # Validation data
+    │   ├── sample_curriculum_train.jsonl       # Sample training data
+    │   ├── sample_curriculum_val.jsonl         # Sample validation data
+    │   ├── impressions.jsonl                   # Raw impressions
+    │   ├── phaseA_manifest.jsonl               # Phase A manifest
+    │   └── chexpert_dict.json                  # CheXpert labels
+    │
+    └── raw_reports/                   # Sample raw reports
+        ├── sample_report_1.txt        # Sample radiology report 1
+        ├── sample_report_2.txt        # Sample radiology report 2
+        ├── sample_report_3.txt        # Sample radiology report 3
+        └── sample_report_4.txt        # Sample radiology report 4
 │
 ├── docs/                              # Documentation
 │   ├── api/                           # API documentation

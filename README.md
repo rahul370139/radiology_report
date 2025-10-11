@@ -27,22 +27,27 @@ This project trains a vision-language model to generate radiology reports from c
 ## 🎯 Datasets
 
 ### Primary Training Data (FINAL CLEAN DATASET)
-| File | Size | Records | Purpose |
-|------|------|---------|---------|
-| `curriculum_train_final_clean.jsonl` | 14.2 MB | 4,797 | **MAIN TRAINING DATA** |
-| `curriculum_val_final_clean.jsonl` | 2.5 MB | 847 | **VALIDATION DATA** |
+| File | Size | Records | Purpose | Location |
+|------|------|---------|---------|----------|
+| `curriculum_train_final_clean.jsonl` | 14.2 MB | 4,797 | **MAIN TRAINING DATA** | `src/data/processed/` |
+| `curriculum_val_final_clean.jsonl` | 2.5 MB | 847 | **VALIDATION DATA** | `src/data/processed/` |
 
 ### Reference Data
-| File | Size | Records | Purpose |
-|------|------|---------|---------|
-| `chexpert_dict.json` | 67.8 MB | 227,827 | CheXpert labels mapping |
-| `impressions.jsonl` | 6.0 MB | 10,003 | Raw impressions (reference) |
-| `phaseA_manifest.jsonl` | 3.9 MB | 10,003 | Phase A manifest (reference) |
+| File | Size | Records | Purpose | Location |
+|------|------|---------|---------|----------|
+| `chexpert_dict.json` | 67.8 MB | 227,827 | CheXpert labels mapping | `src/data/processed/` |
+| `impressions.jsonl` | 6.0 MB | 10,003 | Raw impressions (reference) | `src/data/processed/` |
+| `phaseA_manifest.jsonl` | 3.9 MB | 10,003 | Phase A manifest (reference) | `src/data/processed/` |
 
 ### Image Data
 - **Location**: `files/p10/`
 - **Count**: 10,003 chest X-ray JPG images
 - **Paths**: Already embedded in curriculum samples
+
+### Sample Raw Reports
+- **Location**: `src/data/raw_reports/`
+- **Count**: 4 sample radiology reports
+- **Purpose**: Reference examples of original MIMIC-CXR reports
 
 ### Data Quality & Deduplication
 - **Original Dataset**: 9,638 samples
