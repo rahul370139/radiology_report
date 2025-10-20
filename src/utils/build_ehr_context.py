@@ -29,10 +29,10 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # Configuration
-MIMIC_IV_DIR = pl.Path("files/mimic-iv-3.1")
-CXR_STUDY_LIST = pl.Path("files/cxr-study-list.csv")
-MANIFEST_FILE = pl.Path("data/processed/phaseA_manifest.jsonl")
-OUTPUT_FILE = pl.Path("data/processed/ehr_context.jsonl")
+MIMIC_IV_DIR = pl.Path("../../files/mimic-iv-3.1")  # FIXED: Correct path from src/utils/
+CXR_STUDY_LIST = pl.Path("../../files/cxr-study-list.csv")  # FIXED: Correct path from src/utils/
+MANIFEST_FILE = pl.Path("../../data/processed/phaseA_manifest.jsonl")  # FIXED: Correct path from src/utils/
+OUTPUT_FILE = pl.Path("../../data/processed/ehr_context.jsonl")  # FIXED: Correct path from src/utils/
 
 # Key lab test itemids for common clinical labs
 KEY_LAB_ITEMIDS = {
@@ -66,14 +66,14 @@ KEY_LAB_ITEMIDS = {
     50888: "Alkaline Phosphatase",  # U/L
     
     # Inflammatory Markers
-    51277: "CRP",  # mg/dL
+    51277: "CRP",  # mg/L (FIXED: was mg/dL, MIMIC uses mg/L)
     51288: "ESR",  # mm/hr
-    51237: "Procalcitonin",  # ng/mL
+    51236: "Procalcitonin",  # ng/mL (FIXED: correct ItemID)
     
     # Coagulation
-    51237: "PT",  # seconds
+    51237: "PT",  # seconds (FIXED: was Procalcitonin, now PT only)
+    51274: "INR",  # ratio (FIXED: correct ItemID)
     51275: "PTT",  # seconds
-    51265: "INR",  # ratio
 }
 
 # Dynamic vital signs mapping - will be built from d_items tables
@@ -343,7 +343,32 @@ def extract_comprehensive_vitals(
             for itemid, value, valuenum, valueuom, charttime in icu_results:
                 vital_code = vital_item_map.get(itemid)
                 if vital_code:
+                    # CRITICAL: Vital sign sanity checks at extraction time
                     if valuenum is not None:
+                        # Respiratory rate cannot be 0
+                        if vital_code == "respiratory_rate" and valuenum == 0:
+                            print(f"   ⚠️  Dropping impossible RR: {valuenum}")
+                            continue
+                        
+                        # SpO2 must be 0-100%
+                        if vital_code == "o2_saturation" and not (0 <= valuenum <= 100):
+                            print(f"   ⚠️  Dropping impossible SpO2: {valuenum}%")
+                            continue
+                        
+                        # Heart rate sanity check
+                        if vital_code == "heart_rate" and (valuenum < 20 or valuenum > 300):
+                            print(f"   ⚠️  Dropping implausible HR: {valuenum} bpm")
+                            continue
+                        
+                        # Temperature sanity check
+                        if vital_code in ["temperature_c", "temperature_f"]:
+                            if vital_code == "temperature_c" and (valuenum < 30 or valuenum > 45):
+                                print(f"   ⚠️  Dropping extreme temp: {valuenum}°C")
+                                continue
+                            elif vital_code == "temperature_f" and (valuenum < 86 or valuenum > 113):
+                                print(f"   ⚠️  Dropping extreme temp: {valuenum}°F")
+                                continue
+                        
                         vitals[vital_code] = {
                             "value": float(valuenum),
                             "unit": valueuom or "unknown",
@@ -565,22 +590,64 @@ def extract_comprehensive_labs(
             
             # Store the most recent value for each lab
             if not labs[lab_name]:  # Only store the first (most recent) value
-                lab_data = {
-                    "time": str(charttime) if charttime else None,
-                    "flag": flag
-                }
-                
+                # CRITICAL: Unit sanity checks at extraction time
                 if valuenum is not None:
-                    lab_data["value"] = float(valuenum)
-                    lab_data["unit"] = valueuom or "unknown"
+                    # BNP sanity check - drop mg/dL values
+                    if lab_name == "BNP" and valueuom == "mg/dL":
+                        print(f"   ⚠️  Dropping BNP in mg/dL: {valuenum} mg/dL (should be pg/mL)")
+                        continue
+                    
+                    # PLT sanity check - fix M/uL scaling
+                    if lab_name == "Platelet Count" and valueuom and valueuom.lower() in {"m/ul", "m/uL"}:
+                        if valuenum < 1.0:
+                            valuenum *= 1000  # M/µL → K/µL
+                            valueuom = "K/uL"
+                            print(f"   🔧 Fixed PLT unit: {valuenum/1000} M/uL → {valuenum} K/uL")
+                        else:
+                            print(f"   ⚠️  Dropping implausible PLT: {valuenum} M/uL")
+                            continue
+                    
+                    # BUN sanity check - drop mEq/L values
+                    if lab_name == "BUN" and valueuom == "mEq/L":
+                        print(f"   ⚠️  Dropping BUN in mEq/L: {valuenum} mEq/L (should be mg/dL)")
+                        continue
+                    
+                    # WBC sanity check - drop % values for total count
+                    if lab_name == "WBC Count" and valueuom == "%":
+                        print(f"   ⚠️  Dropping WBC total in %: {valuenum}% (should be K/uL)")
+                        continue
+                    
+                    # INR sanity check - drop K/uL values
+                    if lab_name == "INR" and valueuom == "K/uL":
+                        print(f"   ⚠️  Dropping INR in K/uL: {valuenum} K/uL (should be ratio)")
+                        continue
+                    
+                    # CRP unit fix - convert mg/dL to mg/L if needed
+                    if lab_name == "CRP" and valueuom == "mg/dL":
+                        valuenum *= 10  # mg/dL → mg/L
+                        valueuom = "mg/L"
+                        print(f"   🔧 Fixed CRP unit: {valuenum/10} mg/dL → {valuenum} mg/L")
+                    
+                    lab_data = {
+                        "time": str(charttime) if charttime else None,
+                        "flag": flag,
+                        "value": float(valuenum),
+                        "unit": valueuom or "unknown"
+                    }
                     
                     # Add reference ranges if available
                     if ref_lower is not None and ref_upper is not None:
                         lab_data["reference_range"] = f"{ref_lower}-{ref_upper}"
                         lab_data["normal_range"] = ref_lower <= valuenum <= ref_upper
                 elif value:
-                    lab_data["value"] = value
-                    lab_data["unit"] = valueuom or "unknown"
+                    lab_data = {
+                        "time": str(charttime) if charttime else None,
+                        "flag": flag,
+                        "value": value,
+                        "unit": valueuom or "unknown"
+                    }
+                else:
+                    continue  # Skip if no usable value
                 
                 labs[lab_name] = lab_data
         

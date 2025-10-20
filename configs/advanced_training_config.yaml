@@ -5,93 +5,131 @@
 base_model: "microsoft/llava-med-v1.5-mistral-7b"
 model_type: "llava_mistral"
 
-# Data Configuration
-dataset_path: "data/processed/curriculum_train_final_clean.jsonl"
-validation_path: "data/processed/curriculum_val_final_clean.jsonl"
+# Data Configuration - Using corrected EHR data
+dataset_path: "../../data/processed/curriculum_train_final_clean.jsonl"
+validation_path: "../../data/processed/curriculum_val_final_clean.jsonl"
 image_root: "."
 
 # Advanced Curriculum Learning Configuration
 curriculum_learning: true
-stage_a_oversample_ratio: 0.5  # 50% Stage-A in early training
-synthetic_stage_a_ratio: 0.3   # 30% of Stage-B samples use empty EHR
-stage_split: 0.3               # Save checkpoint_A at 30% of steps
-stage_a_warmup_steps: 0.3      # First 30% steps focus on Stage-A
+stage_a_oversample_ratio: 0.2   # 20% Stage-A (slight oversample of available 18.5%)
+synthetic_stage_a_ratio: 0.05   # 5% of Stage-B samples use empty EHR (minimal)
+stage_split: 0.15              # Save checkpoint_A at 15% of steps (earlier)
+stage_a_warmup_steps: 0.1      # First 10% steps focus on Stage-A (~40 steps)
 
-# Class Balancing Configuration
+# Class Balancing Configuration - Optimized for Stage B EHR data
 use_stratified_sampling: true
-rare_icd_boost: 2.0            # 2x sampling for rare ICDs
-chexpert_positive_boost: 1.5   # 1.5x sampling for positive CheXpert labels
+rare_icd_boost: 2.0            # 2.0x sampling for rare ICDs
+chexpert_positive_boost: 1.8   # 1.8x sampling for positive CheXpert labels
+stage_b_boost: 1.1             # 1.1x sampling for Stage B samples (subtle boost)
+ehr_data_importance: 1.2       # 1.2x importance for samples with rich EHR data
 
-# JSON Drift Prevention
+# JSON Drift Prevention & Generation Guards
 json_constrained_output: true
 json_repair_enabled: true
 json_schema_validation: true
-max_new_tokens: 384
+max_new_tokens: 256            # Reasonable token limit as recommended
 temperature: 0.2
 top_p: 0.9
 do_sample: false
+generation_guard_retry: true   # Retry with "return valid JSON only" if invalid
 
-# Training Configuration
-epochs: 1.2                    # Short epochs to prevent overfitting
-batch_size: 2                  # Per device batch size
-gradient_accumulation_steps: 16 # Effective batch size = 2 * 16 = 32
-learning_rate: 5.0e-5
-warmup_ratio: 0.05             # 5% warmup
+# Training Configuration - Optimized for MPS/CPU with LoRA
+epochs: 2                      # 2 full passes ≈ 272 steps (optimal for LoRA)
+batch_size: 1                  # Micro batch size for memory efficiency
+gradient_accumulation_steps: 32 # Effective batch size = 1 * 32 = 32
+learning_rate: 5.0e-5          # Stage A learning rate
+stage_b_learning_rate: 3.0e-5  # Stage B learning rate (reduced)
+warmup_ratio: 0.1              # 10% warmup (optimized for 2 epochs)
 weight_decay: 0.01
 max_grad_norm: 1.0
+label_smoothing: 0.1           # Label-smoothed token loss
 
-# LoRA Configuration
+# LoRA Configuration - Optimized for MPS/CPU
 use_lora: true
-lora_r: 16
-lora_alpha: 32
+lora_r: 8                      # Reduced from 16 for memory efficiency
+lora_alpha: 16                 # Reduced from 32 to match r=8
 lora_dropout: 0.05
 lora_target_modules:
   - "q_proj"
-  - "v_proj"
+  - "v_proj" 
   - "k_proj"
   - "o_proj"
   - "gate_proj"
   - "up_proj"
   - "down_proj"
-  # Note: mm_projector is a Sequential module, not supported by LoRA
-  # We'll train it fully instead
+  # Removed "mm_projector" - Sequential module not supported by LoRA             # Include projector as recommended
+freeze_vision_backbone: true   # Freeze vision backbone for memory efficiency
+freeze_projector: false        # Do not freeze projector as recommended
 
-# Precision & Performance
+# Precision & Performance - MPS/CPU Optimized
 bf16: false                    # Not supported on macOS MPS
 fp16: false                    # Not supported on macOS MPS either
 tf32: false
+use_fp32: true                 # Force fp32 for MPS/CPU compatibility
+matmul_precision: "high"       # High precision matmul for fp32
 
-# Checkpointing
+# Checkpointing - Optimized for reliability
 save_strategy: "steps"
-save_steps: 10                 # Save every 10 steps to prevent progress loss
+save_steps: 50                 # Save every ~¼ epoch (50 steps)
 save_total_limit: 3
 checkpoint_dir: "checkpoints"
-resume_from_checkpoint: null
+resume_from_checkpoint: "auto" # Auto-resume for reliability
+save_optimizer: true           # Persist optimizer state
+save_scheduler: true           # Persist scheduler state
+load_best_model_at_end: false  # Disable best model loading to avoid metric issues
+metric_for_best_model: "eval_loss"  # Use eval loss for best model selection
 
-# Logging
+# Logging - Optimized for monitoring
 logging_dir: "logs"
-logging_steps: 10
+logging_steps: 5               # More frequent logging
 log_level: "info"
 report_to: "tensorboard"
 
-# Evaluation
+# Evaluation - Optimized for comprehensive metrics
 evaluation_strategy: "steps"
-eval_steps: 100
+eval_steps: 50                # Every ~¼ epoch (50 steps)
 eval_accumulation_steps: 1
-per_device_eval_batch_size: 2
+per_device_eval_batch_size: 1  # Micro batch for memory efficiency
 
-# Early Stopping
-early_stopping_patience: 3
+# Early Stopping - Disabled to prevent metric issues
+early_stopping_patience: 0
 early_stopping_threshold: 0.001
 
 # Image Processing
 image_size: 336
 vision_feature_select_strategy: "default"
 
-# Device & Distributed Training
-device: "cpu"
+# Prompt Templates - Stable JSON-friendly format
+prompt_templates:
+  stage_a_template: |
+    You are a radiology assistant. Analyze the chest X-ray and produce:
+    
+    1) IMPRESSION: A single concise paragraph.
+    2) CheXpert: A strict JSON with keys [Consolidation, Edema, Enlarged Cardiomediastinum, Fracture, Lung Lesion, Lung Opacity, No Finding, Pleural Effusion, Pleural Other, Pneumonia, Pneumothorax, Support Devices].
+    
+    <image>
+  
+  stage_b_template: |
+    EHR:
+    {ehr_data}
+    
+    Now analyze the chest X-ray and produce:
+    
+    1) IMPRESSION: A single concise paragraph.
+    2) CheXpert: A strict JSON with keys [Consolidation, Edema, Enlarged Cardiomediastinum, Fracture, Lung Lesion, Lung Opacity, No Finding, Pleural Effusion, Pleural Other, Pneumonia, Pneumothorax, Support Devices].
+    3) ICD: A strict JSON with keys [Pneumonia, Pleural_Effusion, Pneumothorax, Pulmonary_Edema, Cardiomegaly, Atelectasis, Pulmonary_Embolism, Rib_Fracture] and 0/1 values.
+    
+    <image>
+  
+  generation_guard: "return valid JSON only"
+
+# Device & Distributed Training - MPS/CPU Optimized
+device: "mps"                  # Force MPS - no CPU fallback!
+prefer_mps: true              # Prefer MPS if available
 local_rank: -1
 ddp_find_unused_parameters: false
+gradient_checkpointing: true   # Keep memory flat on MPS
 
 # Optimization
 optim: "adamw_torch"
@@ -99,14 +137,13 @@ adam_beta1: 0.9
 adam_beta2: 0.999
 adam_epsilon: 1.0e-8
 
-# Data Loading
-dataloader_num_workers: 0        # Disable multiprocessing to avoid pickling issues
-dataloader_pin_memory: false
+# Data Loading - MPS/CPU Optimized
+dataloader_num_workers: 0        # Disable multiprocessing for MPS/CPU
+dataloader_pin_memory: false     # Disable pin memory for MPS/CPU
 remove_unused_columns: false
 
-# Other
+# Other - Memory and stability optimizations
 seed: 42
-gradient_checkpointing: true
 dataloader_drop_last: false
 
 # Output
@@ -117,29 +154,33 @@ overwrite_output_dir: false
 checkpoint_a_name: "checkpoint_A"
 checkpoint_b_name: "checkpoint_B"
 
-# Advanced Metrics
+# Advanced Metrics - Comprehensive evaluation as recommended
 metrics:
   - "loss"
-  - "bleu4"
-  - "rouge_l"
-  - "chexpert_f1"
+  - "bleu4"                    # Text metrics on Impression only
+  - "rouge_l"                  # Text metrics on Impression only
+  - "meteor"                   # Text metrics on Impression only
+  - "chexpert_f1"              # Macro-F1 (treat -1 as 0)
   - "chexpert_accuracy"
-  - "icd_f1"
-  - "icd_accuracy"
-  - "json_validity"
-  - "macro_f1"
-  - "micro_f1"
+  - "icd_f1"                   # Macro-F1 (Stage B only)
+  - "icd_accuracy"             # Stage B only
+  - "json_validity"            # % valid CheXpert & ICD blocks
+  - "composite_score"          # 0.5*METEOR + 0.5*CheXpert_F1
 
-# Curriculum Mixing Strategy
+# Curriculum Mixing Strategy - Optimized for Stage B dominance
 curriculum_mixing:
-  steps_0_30:
-    stage_a_ratio: 0.5
-    synthetic_stage_a_ratio: 0.3
-    description: "Stage-A heavy with synthetic boost"
-  steps_30_100:
+  steps_0_15:
     stage_a_ratio: 0.2
-    synthetic_stage_a_ratio: 0.1
-    description: "Stage-B dominant with some image-only"
+    synthetic_stage_a_ratio: 0.05
+    description: "Quick Stage-A warmup with natural ratios"
+  steps_15_40:
+    stage_a_ratio: 0.15
+    synthetic_stage_a_ratio: 0.03
+    description: "Transition to Stage-B focus"
+  steps_40_100:
+    stage_a_ratio: 0.12
+    synthetic_stage_a_ratio: 0.01
+    description: "Stage-B dominant with minimal image-only"
 
 # ICD Classes for Stratified Sampling
 icd_classes:

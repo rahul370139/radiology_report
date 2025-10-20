@@ -7,11 +7,13 @@ Handles loading images, prompts, and targets for both Stage A and Stage B traini
 
 import json
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, WeightedRandomSampler
 from PIL import Image
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import logging
+import numpy as np
+from collections import Counter
 
 logger = logging.getLogger(__name__)
 
@@ -112,18 +114,41 @@ class CurriculumDataset(Dataset):
             # Return a blank image as fallback
             image = Image.new('RGB', (336, 336), color='black')
         
-        # Build prompt and target from available data
+        # Build prompt and target using structured templates
         if sample['stage'] == 'A':
-            # Stage A: Image-only
-            prompt = "<image>\nTask: Provide (1) Impression, (2) CheXpert JSON, (3) ICD JSON.\nImpression:"
-            target = sample['impression']
+            # Stage A: Image-only with structured prompt
+            prompt = """You are a radiology assistant. Analyze the chest X-ray and produce:
+
+TASK:
+1) IMPRESSION: A single concise paragraph.
+2) CheXpert: A strict JSON with keys [Consolidation, Edema, Enlarged Cardiomediastinum, Fracture, Lung Lesion, Lung Opacity, No Finding, Pleural Effusion, Pleural Other, Pneumonia, Pneumothorax, Support Devices].
+
+<image>"""
+            
+            # Format target with CheXpert labels
+            chexpert_labels = sample.get('chexpert_labels', {})
+            target = self._format_stage_a_target(sample['impression'], chexpert_labels)
             mode = "image_only"
         else:
-            # Stage B: Image + EHR
+            # Stage B: Image + EHR with structured prompt
             patient_data = sample.get('patient_data', {})
-            ehr_json = json.dumps(patient_data, indent=2) if patient_data else "{}"
-            prompt = f"<image>\nPatient Data: {ehr_json}\nTask: Provide (1) Impression, (2) CheXpert JSON, (3) ICD JSON.\nImpression:"
-            target = sample['impression']
+            ehr_data = self._format_ehr_data(patient_data)
+            prompt = f"""EHR:
+{ehr_data}
+
+Now analyze the chest X-ray and produce:
+
+TASK:
+1) IMPRESSION: A single concise paragraph.
+2) CheXpert: A strict JSON with keys [Consolidation, Edema, Enlarged Cardiomediastinum, Fracture, Lung Lesion, Lung Opacity, No Finding, Pleural Effusion, Pleural Other, Pneumonia, Pneumothorax, Support Devices].
+3) ICD: A strict JSON with keys [Pneumonia, Pleural_Effusion, Pneumothorax, Pulmonary_Edema, Cardiomegaly, Atelectasis, Pulmonary_Embolism, Rib_Fracture] and 0/1 values.
+
+<image>"""
+            
+            # Format target with CheXpert and ICD labels
+            chexpert_labels = sample.get('chexpert_labels', {})
+            icd_labels = sample.get('icd_labels', {})
+            target = self._format_stage_b_target(sample['impression'], chexpert_labels, icd_labels)
             mode = "image_ehr"
         
         # Extract study_id from image_path if available
@@ -143,6 +168,154 @@ class CurriculumDataset(Dataset):
             'study_id': study_id,
             'image_path': str(image_path),
         }
+    
+    def _format_ehr_data(self, patient_data: Dict[str, Any]) -> str:
+        """Format patient data into compact EHR JSON"""
+        ehr = {}
+        
+        # Basic demographics
+        if 'Age' in patient_data:
+            ehr['Age'] = patient_data['Age']
+        if 'Sex' in patient_data:
+            ehr['Sex'] = patient_data['Sex']
+        
+        # Vitals with time deltas
+        if 'Vitals' in patient_data and patient_data['Vitals']:
+            vitals = {}
+            for vital_name, vital_info in patient_data['Vitals'].items():
+                if isinstance(vital_info, dict) and 'value' in vital_info:
+                    # Map vital names to standard abbreviations
+                    vital_key = self._map_vital_name(vital_name)
+                    if vital_key:
+                        vitals[vital_key] = vital_info['value']
+                        # Add time delta if available
+                        if 'delta_hours_from_cxr' in vital_info:
+                            vitals[f"{vital_key}_delta_hours"] = vital_info['delta_hours_from_cxr']
+            if vitals:
+                ehr['Vitals'] = vitals
+        
+        # Labs with time deltas
+        if 'Labs' in patient_data and patient_data['Labs']:
+            labs = {}
+            for lab_name, lab_info in patient_data['Labs'].items():
+                if isinstance(lab_info, dict) and 'value' in lab_info and 'unit' in lab_info:
+                    # Use canonical name and include unit
+                    canonical_name = lab_info.get('canonical_name', lab_name)
+                    labs[canonical_name] = {
+                        'value': lab_info['value'],
+                        'unit': lab_info['unit']
+                    }
+                    # Add time delta if available
+                    if 'delta_hours_from_cxr' in lab_info:
+                        labs[canonical_name]['delta_hours'] = lab_info['delta_hours_from_cxr']
+            if labs:
+                ehr['Labs'] = labs
+        
+        # Chronic conditions
+        if 'Chronic_conditions' in patient_data and patient_data['Chronic_conditions']:
+            ehr['Chronic'] = patient_data['Chronic_conditions']
+        
+        return json.dumps(ehr, separators=(',', ':'))
+    
+    def _map_vital_name(self, vital_name: str) -> Optional[str]:
+        """Map vital name to standard abbreviation"""
+        mapping = {
+            'heart_rate': 'HR',
+            'systolic_bp': 'SBP',
+            'diastolic_bp': 'DBP',
+            'mean_bp': 'MBP',
+            'blood_pressure': 'BP',
+            'o2_saturation': 'SpO2',
+            'respiratory_rate': 'RR',
+            'temperature_f': 'TempF',
+            'temperature_c': 'TempC',
+            'weight': 'Weight',
+            'height': 'Height',
+            'bmi': 'BMI'
+        }
+        return mapping.get(vital_name.lower())
+    
+    def _format_stage_a_target(self, impression: str, chexpert_labels: Dict[str, int]) -> str:
+        """Format Stage A target response"""
+        # CheXpert labels in consistent order
+        chexpert_order = [
+            "Consolidation", "Edema", "Enlarged Cardiomediastinum", "Fracture",
+            "Lung Lesion", "Lung Opacity", "No Finding", "Pleural Effusion",
+            "Pleural Other", "Pneumonia", "Pneumothorax", "Support Devices"
+        ]
+        
+        chexpert_json = {}
+        for label in chexpert_order:
+            chexpert_json[label] = chexpert_labels.get(label, 0)
+        
+        return f"""1) IMPRESSION: {impression}
+
+2) CheXpert: {json.dumps(chexpert_json)}"""
+    
+    def _format_stage_b_target(self, impression: str, chexpert_labels: Dict[str, int], 
+                              icd_labels: Dict[str, int]) -> str:
+        """Format Stage B target response"""
+        # CheXpert labels in consistent order
+        chexpert_order = [
+            "Consolidation", "Edema", "Enlarged Cardiomediastinum", "Fracture",
+            "Lung Lesion", "Lung Opacity", "No Finding", "Pleural Effusion",
+            "Pleural Other", "Pneumonia", "Pneumothorax", "Support Devices"
+        ]
+        
+        # ICD labels in consistent order
+        icd_order = [
+            "Pneumonia", "Pleural_Effusion", "Pneumothorax", "Pulmonary_Edema",
+            "Cardiomegaly", "Atelectasis", "Pulmonary_Embolism", "Rib_Fracture"
+        ]
+        
+        chexpert_json = {}
+        for label in chexpert_order:
+            chexpert_json[label] = chexpert_labels.get(label, 0)
+        
+        icd_json = {}
+        for label in icd_order:
+            icd_json[label] = icd_labels.get(label, 0)
+        
+        return f"""1) IMPRESSION: {impression}
+
+2) CheXpert: {json.dumps(chexpert_json)}
+
+3) ICD: {json.dumps(icd_json)}"""
+    
+    def create_stratified_sampler(self, rare_boost: float = 5.0) -> WeightedRandomSampler:
+        """Create stratified sampler to boost rare positive labels"""
+        
+        # Rare labels that need boosting
+        rare_chexpert = ['Pneumothorax', 'Fracture', 'Lung Lesion']
+        rare_icd = ['Pulmonary_Embolism', 'Rib_Fracture', 'Pneumothorax']
+        
+        weights = []
+        for i, sample in enumerate(self.samples):
+            weight = 1.0
+            
+            # Boost rare CheXpert positives
+            if 'chexpert_labels' in sample:
+                for label in rare_chexpert:
+                    if sample['chexpert_labels'].get(label, 0) == 1:
+                        weight *= rare_boost
+            
+            # Boost rare ICD positives
+            if 'icd_labels' in sample:
+                for label in rare_icd:
+                    if sample['icd_labels'].get(label, 0) == 1:
+                        weight *= rare_boost
+            
+            weights.append(weight)
+        
+        # Normalize weights
+        weights = np.array(weights)
+        weights = weights / weights.sum() * len(weights)
+        
+        return WeightedRandomSampler(
+            weights=weights,
+            num_samples=len(self.samples),
+            replacement=True
+        )
     
     def collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         """

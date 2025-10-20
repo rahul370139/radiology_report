@@ -1,0 +1,43 @@
+{
+  "subject_id": 10245082,
+  "Age": 77,
+  "Sex": "M",
+  "hadm_id": 21547834,
+  "admission_type": "ELECTIVE",
+  "Vitals": {},
+  "Labs": {
+    "Glucose": {
+      "canonical_name": "Glucose",
+      "value": 229.0,
+      "unit": "mg/dL",
+      "reference_range": [70.0, 100.0],
+      "normal_range": false,
+      "value_is_suspect": true,
+      "delta_hours": -4.0
+    },
+    "BNP": {
+      "canonical_name": "BNP",
+      "value": 250000.0,
+      "unit": "pg/mL",
+      "reference_range": [0.0, 100.0],
+      "normal_range": false,
+      "value_is_suspect": true,
+      "delta_hours": -4.0
+    },
+    "Creatinine": {
+      "canonical_name": "Creatinine",
+      "value": 1.4,
+      "unit": "mg/dL",
+      "reference_range": [0.6, 1.2],
+      "normal_range": false,
+      "value_is_suspect": false,
+      "delta_hours": -4.0
+    }
+  },
+  "O2_device": {
+    "device": "unknown",
+    "flow_lpm": null,
+    "fio2": null
+  },
+  "Chronic_conditions": []
+}

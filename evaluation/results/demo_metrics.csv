@@ -1,0 +1,2 @@
+rougeL_fmeasure,rouge1_fmeasure,rouge2_fmeasure,bleu_score,chexpert_micro_f1,chexpert_micro_precision,chexpert_micro_recall,icd_micro_f1,icd_micro_precision,icd_micro_recall
+0.10953520164046479,0.17879927090453407,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
