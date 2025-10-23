@@ -65,7 +65,15 @@ class SimpleBatchEvaluator:
             for idx, row in manifest_df.iterrows():
                 print(f"Processing sample {idx+1}/{len(manifest_df)}: {row['study_id']}")
                 image_path = Path(row['image_path'])
-                ehr_json_path = Path(row['ehr_json_path']) if pd.notna(row['ehr_json_path']) and row['ehr_json_path'] else None
+                ehr_json_path = None
+                if pd.notna(row['ehr_json_path']) and row['ehr_json_path']:
+                    candidate = Path(row['ehr_json_path'])
+                    if not candidate.exists():
+                        alt_candidate = Path('evaluation') / row['ehr_json_path']
+                        if alt_candidate.exists():
+                            candidate = alt_candidate
+                    if candidate.exists():
+                        ehr_json_path = candidate
                 
                 ehr_data = None
                 if ehr_json_path and ehr_json_path.exists():

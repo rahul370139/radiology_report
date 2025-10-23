@@ -55,7 +55,7 @@ fi
 pip install pandas numpy scikit-learn rouge-score nltk --quiet
 
 # Set environment variables for model paths (adjust these paths for your server)
-export BASE_MODEL_PATH="${BASE_MODEL_PATH:-/Users/bilbouser/.cache/huggingface/hub/models--microsoft--llava-med-v1.5-mistral-7b/snapshots/f2f72301dc934e74948b5802c87dbc83d100e6bd}"
+export BASE_MODEL_PATH="${BASE_MODEL_PATH:-microsoft/llava-med-v1.5-mistral-7b}"
 export LORA_DIR="${LORA_DIR:-checkpoints}"
 export GEN_TEMPERATURE="${GEN_TEMPERATURE:-0.05}"
 export GEN_MAX_NEW_TOKENS="${GEN_MAX_NEW_TOKENS:-512}"

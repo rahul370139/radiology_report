@@ -8,6 +8,7 @@ import pandas as pd
 import json
 import time
 from pathlib import Path
+from typing import Any, Dict
 from PIL import Image
 import sys
 import os
@@ -15,7 +16,7 @@ import os
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from inference.pipeline import generate, get_pipeline
+from inference.pipeline import generate, get_pipeline, ICD
 
 # Page config
 st.set_page_config(
@@ -76,14 +77,21 @@ def load_demo_manifest():
 
 def load_ehr_data(ehr_path):
     """Load EHR data from JSON file"""
-    if not ehr_path or not Path(ehr_path).exists():
+    if not ehr_path:
         return None
-    
-    with open(ehr_path, 'r') as f:
+    path = Path(ehr_path)
+    if not path.exists():
+        alt_path = Path("evaluation") / ehr_path
+        if alt_path.exists():
+            path = alt_path
+    if not path.exists():
+        return None
+
+    with open(path, 'r') as f:
         return json.load(f)
 
 def display_chexpert_labels(labels_dict, title="CheXpert Labels"):
-    """Display CheXpert labels in a nice format"""
+    """Display CheXpert labels in a nice format with improved visibility"""
     st.subheader(title)
     
     # Create two columns for better layout
@@ -92,34 +100,51 @@ def display_chexpert_labels(labels_dict, title="CheXpert Labels"):
     with col1:
         for i, (label, value) in enumerate(list(labels_dict.items())[:6]):
             if value == 1:
-                st.write(f"✅ **{label}**")
+                st.markdown(f"<div style='background-color: #d4edda; padding: 8px; border-radius: 5px; margin: 2px 0; border-left: 4px solid #28a745;'>✅ <strong>{label}</strong> (Positive)</div>", unsafe_allow_html=True)
             elif value == -1:
-                st.write(f"❌ **{label}**")
+                st.markdown(f"<div style='background-color: #f8d7da; padding: 8px; border-radius: 5px; margin: 2px 0; border-left: 4px solid #dc3545;'>❌ <strong>{label}</strong> (Negative)</div>", unsafe_allow_html=True)
             else:
-                st.write(f"⚪ {label}")
+                st.markdown(f"<div style='background-color: #e9ecef; padding: 8px; border-radius: 5px; margin: 2px 0; border-left: 4px solid #6c757d;'>⚫ <strong>{label}</strong> (Uncertain)</div>", unsafe_allow_html=True)
     
     with col2:
         for i, (label, value) in enumerate(list(labels_dict.items())[6:]):
             if value == 1:
-                st.write(f"✅ **{label}**")
+                st.markdown(f"<div style='background-color: #d4edda; padding: 8px; border-radius: 5px; margin: 2px 0; border-left: 4px solid #28a745;'>✅ <strong>{label}</strong> (Positive)</div>", unsafe_allow_html=True)
             elif value == -1:
-                st.write(f"❌ **{label}**")
+                st.markdown(f"<div style='background-color: #f8d7da; padding: 8px; border-radius: 5px; margin: 2px 0; border-left: 4px solid #dc3545;'>❌ <strong>{label}</strong> (Negative)</div>", unsafe_allow_html=True)
             else:
-                st.write(f"⚪ {label}")
+                st.markdown(f"<div style='background-color: #e9ecef; padding: 8px; border-radius: 5px; margin: 2px 0; border-left: 4px solid #6c757d;'>⚫ <strong>{label}</strong> (Uncertain)</div>", unsafe_allow_html=True)
 
 def display_icd_labels(labels_dict, title="ICD Predictions"):
-    """Display ICD labels in a nice format"""
+    """Display ICD labels in a nice format with improved visibility"""
     st.subheader(title)
     
-    # Only show labels with confidence > 0
-    active_labels = {k: v for k, v in labels_dict.items() if v > 0}
-    
-    if active_labels:
-        for label, confidence in active_labels.items():
-            confidence_pct = confidence * 100
-            st.write(f"🔍 **{label}**: {confidence_pct:.1f}%")
-    else:
-        st.write("No ICD predictions with confidence > 0")
+    # Show all labels with visual indicators
+    for label, confidence in labels_dict.items():
+        confidence_pct = confidence * 100
+        if confidence > 0:
+            st.markdown(f"<div style='background-color: #cce5ff; padding: 8px; border-radius: 5px; margin: 2px 0; border-left: 4px solid #007bff;'>🔍 <strong>{label}</strong>: {confidence_pct:.1f}% (High Confidence)</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div style='background-color: #f8f9fa; padding: 8px; border-radius: 5px; margin: 2px 0; border-left: 4px solid #6c757d;'>⚫ <strong>{label}</strong>: {confidence_pct:.1f}% (No Evidence)</div>", unsafe_allow_html=True)
+
+
+def render_prediction(result: Dict[str, Any], *, title: str, show_icd: bool = False, generation_time: float = None, device: str = None):
+    st.markdown(f'<div class="result-box"><h3>{title}</h3>', unsafe_allow_html=True)
+    st.subheader("📝 Impression")
+    st.write(result.get('impression', ''))
+    display_chexpert_labels(result.get('chexpert', {}))
+    if show_icd:
+        display_icd_labels(result.get('icd', {}))
+    if generation_time is not None:
+        caption = f"⏱️ {generation_time:.2f}s"
+        if device:
+            caption += f" · Device: {device}"
+        st.caption(caption)
+    raw_output = result.get('raw_output')
+    if raw_output:
+        with st.expander("Raw model output"):
+            st.code(raw_output)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 def main():
     # Header
@@ -137,27 +162,53 @@ def main():
     # Device selection
     device = st.sidebar.selectbox("Select Device", ["cpu", "cuda", "mps"], index=0)
     
+    # Input mode selection
+    input_mode = st.sidebar.radio("Input Mode", ["📁 Use Demo Samples", "📤 Upload Your Image"], index=0)
+    
     # Stage selection
     stage = st.sidebar.selectbox("Select Stage", ["A (Image Only)", "B (Image + EHR)"], index=0)
     is_stage_b = stage.startswith("B")
     
-    # Sample selection
-    if is_stage_b:
-        available_samples = manifest_df[manifest_df['stage'] == 'B']
+    selected_sample = None
+    uploaded_image = None
+    
+    if input_mode == "📁 Use Demo Samples":
+        # Sample selection
+        if is_stage_b:
+            available_samples = manifest_df[manifest_df['stage'] == 'B']
+        else:
+            available_samples = manifest_df[manifest_df['stage'] == 'A']
+        
+        if len(available_samples) == 0:
+            st.error(f"No {stage} samples available in manifest")
+            return
+        
+        sample_idx = st.sidebar.selectbox(
+            f"Select Sample (0-{len(available_samples)-1})", 
+            range(len(available_samples)),
+            format_func=lambda x: f"Sample {x+1}: {available_samples.iloc[x]['study_id']}"
+        )
+        
+        selected_sample = available_samples.iloc[sample_idx]
     else:
-        available_samples = manifest_df[manifest_df['stage'] == 'A']
-    
-    if len(available_samples) == 0:
-        st.error(f"No {stage} samples available in manifest")
-        return
-    
-    sample_idx = st.sidebar.selectbox(
-        f"Select Sample (0-{len(available_samples)-1})", 
-        range(len(available_samples)),
-        format_func=lambda x: f"Sample {x+1}: {available_samples.iloc[x]['study_id']}"
-    )
-    
-    selected_sample = available_samples.iloc[sample_idx]
+        # Image upload
+        uploaded_file = st.sidebar.file_uploader("Choose a chest X-ray image", type=['png', 'jpg', 'jpeg'])
+        if uploaded_file is not None:
+            # Save uploaded image temporarily
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                uploaded_image = tmp_file.name
+            
+            # Create a mock sample for uploaded image
+            selected_sample = {
+                'study_id': 'uploaded_image',
+                'image_path': uploaded_image,
+                'ground_truth_impression': 'Uploaded image - no ground truth available',
+                'ground_truth_chexpert': '{}',
+                'ground_truth_icd': '{}',
+                'stage': 'A' if not is_stage_b else 'B'
+            }
     
     # Load EHR data if Stage B
     ehr_data = None
@@ -215,36 +266,59 @@ def main():
         # Generate button
         if st.button("🚀 Generate Report", type="primary"):
             with st.spinner("Generating radiology report..."):
-                start_time = time.time()
-                
                 try:
-                    # Generate prediction
-                    result = generate(image_path, ehr_data, device=device)
-                    generation_time = time.time() - start_time
-                    
-                    # Display results
-                    st.markdown('<div class="result-box">', unsafe_allow_html=True)
-                    
-                    # Impression
-                    st.subheader("📝 Impression")
-                    st.write(result['impression'])
-                    
-                    # CheXpert labels
-                    display_chexpert_labels(result['chexpert'])
-                    
-                    # ICD labels (only for Stage B)
                     if is_stage_b:
-                        display_icd_labels(result['icd'])
-                    
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    # Performance metrics
-                    st.markdown('<div class="metric-box">', unsafe_allow_html=True)
-                    st.write(f"⏱️ **Generation Time**: {generation_time:.2f} seconds")
-                    st.write(f"🖥️ **Device**: {device}")
-                    st.write(f"📊 **Stage**: {stage}")
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
+                        start_a = time.time()
+                        result_image_only = generate(image_path, None, device=device)
+                        time_a = time.time() - start_a
+
+                        start_b = time.time()
+                        result_with_ehr = generate(image_path, ehr_data, device=device)
+                        time_b = time.time() - start_b
+
+                        col_pred_a, col_pred_b = st.columns(2)
+                        with col_pred_a:
+                            render_prediction(
+                                result_image_only,
+                                title="Demo A · Image Only",
+                                show_icd=True,
+                                generation_time=time_a,
+                                device=device,
+                            )
+                        with col_pred_b:
+                            render_prediction(
+                                result_with_ehr,
+                                title="Demo B · Image + EHR",
+                                show_icd=True,
+                                generation_time=time_b,
+                                device=device,
+                            )
+
+                        # Highlight ICD deltas
+                        icd_off = result_image_only.get("icd", {})
+                        icd_on = result_with_ehr.get("icd", {})
+                        delta_labels = [label for label in ICD if icd_on.get(label, 0) != icd_off.get(label, 0)]
+                        with st.expander("View ICD comparison"):
+                            st.write("**ICD Differences (EHR vs Image-only):**")
+                            if delta_labels:
+                                for label in delta_labels:
+                                    st.write(
+                                        f"- {label}: {icd_off.get(label, 0)} ➜ {icd_on.get(label, 0)}"
+                                    )
+                            else:
+                                st.write("No change in ICD predictions between the two runs.")
+                    else:
+                        start_time = time.time()
+                        result = generate(image_path, None, device=device)
+                        generation_time = time.time() - start_time
+                        render_prediction(
+                            result,
+                            title="Demo A · Image Only",
+                            show_icd=False,
+                            generation_time=generation_time,
+                            device=device,
+                        )
+
                 except Exception as e:
                     st.error(f"❌ Error during generation: {str(e)}")
                     st.write("Please check that the model is properly loaded and the image path is correct.")
