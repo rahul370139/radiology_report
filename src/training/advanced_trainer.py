@@ -40,6 +40,12 @@ from transformers import (
 )
 from transformers import BitsAndBytesConfig
 
+# Ensure AdamW exposes a harmless train() for newer Trainer loops
+if not hasattr(torch.optim.AdamW, "train"):
+    def _adamw_train(self, *args, **kwargs):
+        return None
+    torch.optim.AdamW.train = _adamw_train
+
 def setup_mps_aggressively():
     """Select best available device (CUDA > MPS > CPU) and apply safe memory tweaks.
 
