@@ -116,16 +116,21 @@ class AdvancedCurriculumTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """Compute combined generative + auxiliary classification loss."""
-        inputs = inputs.copy()
-        chexpert_targets = inputs.pop('chexpert_targets', None)
-        chexpert_masks = inputs.pop('chexpert_masks', None)
-        icd_targets = inputs.pop('icd_targets', None)
-        icd_masks = inputs.pop('icd_masks', None)
-        
-        # Ensure dict output with hidden states for auxiliary heads
-        inputs['output_hidden_states'] = True
-        inputs['return_dict'] = True
-        outputs = model(**inputs)
+        raw_inputs = inputs.copy()
+        chexpert_targets = raw_inputs.pop('chexpert_targets', None)
+        chexpert_masks = raw_inputs.pop('chexpert_masks', None)
+        icd_targets = raw_inputs.pop('icd_targets', None)
+        icd_masks = raw_inputs.pop('icd_masks', None)
+
+        # Prepare call inputs for HF LLaVA base
+        call_inputs = raw_inputs
+        call_inputs['output_hidden_states'] = True
+        call_inputs['return_dict'] = True
+        images = call_inputs.pop('images', None)
+        if images is not None and 'pixel_values' not in call_inputs:
+            call_inputs['pixel_values'] = images
+
+        outputs = model(**call_inputs)
         base_loss = outputs.loss
         if base_loss is None:
             logits = outputs.logits
