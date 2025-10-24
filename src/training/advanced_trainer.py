@@ -405,7 +405,11 @@ class AdvancedRadiologyTrainer:
         # dtype selection: float16 on CUDA, fp32 otherwise
         dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         use_8bit = bool(self.config.get('load_in_8bit', False)) and torch.cuda.is_available()
-        quantization_config = BitsAndBytesConfig(load_in_8bit=True) if use_8bit else None
+        modules_to_skip = self.config.get('llm_int8_skip_modules', ["multi_modal_projector"])
+        quantization_config = (
+            BitsAndBytesConfig(load_in_8bit=True, llm_int8_skip_modules=modules_to_skip)
+            if use_8bit else None
+        )
         device_map = "auto" if torch.cuda.is_available() else None
         
         try:
@@ -665,7 +669,7 @@ class AdvancedRadiologyTrainer:
         
         # Always train projector fully (critical for vision models)
         for name, param in self.model.named_parameters():
-            if "multi_modal_projector" in name:
+            if "multi_modal_projector" in name and param.dtype.is_floating_point:
                 param.requires_grad_(True)
                 logger.info(f"✅ projector trainable: {name}")
         
