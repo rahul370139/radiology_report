@@ -18,9 +18,16 @@ lora_alpha: 32
 lora_dropout: 0.05
 lora_checkpoint_path: null
 lora_target_modules:
-  - "mm_projector"
-  - "model.layers.30."
-  - "model.layers.31."
+  - "q_proj"
+  - "k_proj"
+  - "v_proj"
+  - "o_proj"
+  - "gate_proj"
+  - "up_proj"
+  - "down_proj"
+  - "multi_modal_projector"
+layers_pattern: "layers"
+layers_to_transform: [30, 31]
 
 # Vision freezing: keep tower frozen, unfreeze projector & last blocks
 freeze_vision_backbone: true

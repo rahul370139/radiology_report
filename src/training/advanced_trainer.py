@@ -627,20 +627,27 @@ class AdvancedRadiologyTrainer:
                 'lora_target_modules',
                 [
                     "q_proj",
-                    "v_proj",
                     "k_proj",
+                    "v_proj",
                     "o_proj",
                     "gate_proj",
                     "up_proj",
                     "down_proj",
+                    "multi_modal_projector",
                 ],
             )
+            lora_kwargs = {}
+            if 'layers_to_transform' in self.config:
+                lora_kwargs['layers_to_transform'] = self.config['layers_to_transform']
+            if 'layers_pattern' in self.config:
+                lora_kwargs['layers_pattern'] = self.config['layers_pattern']
             lora_config = LoraConfig(
                 task_type=TaskType.CAUSAL_LM,
                 r=self.config['lora_r'],
                 lora_alpha=self.config['lora_alpha'],
                 lora_dropout=self.config['lora_dropout'],
                 target_modules=target_modules,
+                **lora_kwargs,
             )
 
             self.model = get_peft_model(self.model, lora_config)
@@ -656,11 +663,11 @@ class AdvancedRadiologyTrainer:
                 param.requires_grad_(True)
                 logger.info(f"✅ LoRA trainable: {name}")
         
-        # Always train mm_projector fully (critical for vision models)
+        # Always train projector fully (critical for vision models)
         for name, param in self.model.named_parameters():
-            if "mm_projector" in name:
+            if "multi_modal_projector" in name:
                 param.requires_grad_(True)
-                logger.info(f"✅ mm_projector trainable: {name}")
+                logger.info(f"✅ projector trainable: {name}")
         
         # Log trainable parameters
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
