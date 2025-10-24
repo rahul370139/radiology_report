@@ -25,9 +25,10 @@ lora_target_modules:
   - "gate_proj"
   - "up_proj"
   - "down_proj"
-  - "multi_modal_projector"
 layers_pattern: "layers"
 layers_to_transform: [30, 31]
+modules_to_save:
+  - "multi_modal_projector"
 
 # Vision freezing: keep tower frozen, unfreeze projector & last blocks
 freeze_vision_backbone: true

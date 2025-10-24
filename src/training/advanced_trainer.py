@@ -648,7 +648,6 @@ class AdvancedRadiologyTrainer:
                     "gate_proj",
                     "up_proj",
                     "down_proj",
-                    "multi_modal_projector",
                 ],
             )
             lora_kwargs = {}
