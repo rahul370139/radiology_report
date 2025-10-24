@@ -127,8 +127,9 @@ class AdvancedCurriculumTrainer(Trainer):
         call_inputs['output_hidden_states'] = True
         call_inputs['return_dict'] = True
         images = call_inputs.pop('images', None)
-        if images is not None and 'pixel_values' not in call_inputs:
-            call_inputs['pixel_values'] = images
+        if images is not None:
+            if 'pixel_values' not in call_inputs:
+                call_inputs['pixel_values'] = images
 
         outputs = model(**call_inputs)
         base_loss = outputs.loss
@@ -364,6 +365,20 @@ class AdvancedRadiologyTrainer:
         # Use HF AutoProcessor for HF LLaVA variants; else use custom processor
         if is_hf_llava:
             self.processor = AutoProcessor.from_pretrained(base_id, trust_remote_code=True)
+            vision_cfg = getattr(cfg, "vision_config", None)
+            if hasattr(self.processor, "tokenizer"):
+                self.processor.tokenizer.padding_side = "right"
+            if vision_cfg is not None:
+                patch_size = getattr(vision_cfg, "patch_size", None)
+                if patch_size is None and isinstance(vision_cfg, dict):
+                    patch_size = vision_cfg.get("patch_size")
+                if patch_size is not None:
+                    setattr(self.processor, "patch_size", patch_size)
+                strategy = getattr(vision_cfg, "vision_feature_select_strategy", None)
+                if strategy is None and isinstance(vision_cfg, dict):
+                    strategy = vision_cfg.get("vision_feature_select_strategy")
+                if strategy is not None:
+                    setattr(self.processor, "vision_feature_select_strategy", strategy)
         else:
             self.processor = self._create_llava_processor()
         
@@ -716,17 +731,25 @@ class AdvancedRadiologyTrainer:
         
         if self.config.get('unfreeze_projector', True):
             projector = None
-            if hasattr(self.model, "mm_projector"):
-                projector = self.model.mm_projector
-            elif hasattr(self.model, "base_model") and hasattr(self.model.base_model, "model") \
-                    and hasattr(self.model.base_model.model, "mm_projector"):
-                projector = self.model.base_model.model.mm_projector
+            candidate_attrs = ["multi_modal_projector", "mm_projector"]
+            sources = [self.model]
+            if hasattr(self.model, "base_model"):
+                sources.append(getattr(self.model.base_model, "model", None))
+            for source in sources:
+                if source is None:
+                    continue
+                for attr in candidate_attrs:
+                    if hasattr(source, attr):
+                        projector = getattr(source, attr)
+                        break
+                if projector is not None:
+                    break
             if projector is not None:
                 for param in projector.parameters():
                     param.requires_grad_(True)
-                logger.info("✅ mm_projector parameters unfrozen")
+                logger.info("✅ Projector parameters unfrozen")
             else:
-                logger.warning("⚠️ Unable to locate mm_projector to unfreeze")
+                logger.warning("⚠️ Unable to locate projector module to unfreeze")
         
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.model.parameters())
