@@ -462,115 +462,48 @@ TASK:
         )
     
     def collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Collate function for DataLoader.
-        
-        Args:
-            batch: List of samples from __getitem__
-            
-        Returns:
-            Batched data ready for model input
-        """
-        images = [item['image'] for item in batch]  # PIL Images from __getitem__
-        prompts = [item['prompt'] for item in batch]
-        targets = [item['target'] for item in batch]
+        """Collate function that builds multimodal prompts for HF LLaVA processors."""
+        images = [item['image'] for item in batch]
         chexpert_targets = [torch.tensor(item['chexpert_target'], dtype=torch.float32) for item in batch]
         chexpert_masks = [torch.tensor(item['chexpert_mask'], dtype=torch.float32) for item in batch]
         icd_targets = [torch.tensor(item['icd_target'], dtype=torch.float32) for item in batch]
         icd_masks = [torch.tensor(item['icd_mask'], dtype=torch.float32) for item in batch]
-        
-        # Process with HuggingFace processor if available
+
         if self.processor is not None:
-            # Build chat template messages for each sample
-            chat_texts = []
-            for i, item in enumerate(batch):
-                has_ehr = item['mode'] == 'image_ehr'
-                user_content = []
-                if has_ehr and item.get('ehr_context'):
-                    user_content.append({"type": "text", "text": item['ehr_context'] + "\n"})
-                user_content.append({"type": "image"})
-                user_content.append({"type": "text", "text": "Provide:\nImpression:\nCheXpert:\nICD:"})
-                messages = [
-                    {"role": "user", "content": user_content},
-                    {"role": "assistant", "content": [{"type": "text", "text": item['target']}]},
-                ]
-                chat_texts.append(
-                    self.processor.apply_chat_template(
-                        messages,
-                        add_generation_prompt=False,
-                        tokenize=False,
-                    )
-                )
-            
-            # Process images and text together
+            messages_batch: List[List[Dict[str, Any]]] = []
+            for item in batch:
+                user_entries: List[Dict[str, Any]] = []
+                if item['mode'] == 'image_ehr' and item.get('ehr_context'):
+                    user_entries.append({"type": "text", "text": item['ehr_context'] + "\n"})
+                user_entries.append({"type": "image"})
+                user_entries.append({"type": "text", "text": "Provide:\nImpression:\nCheXpert:\nICD:"})
+                messages_batch.append([
+                    {"role": "user", "content": user_entries},
+                    {"role": "assistant", "content": [{"type": "text", "text": item['target']}]}])
+
             processed = self.processor(
-                text=chat_texts,
+                messages=messages_batch,
                 images=images,
-                return_tensors="pt",
                 padding=True,
-                truncation=True,
-                max_length=self.max_length,
+                return_tensors="pt",
             )
-            
-            # Create proper labels with masking
-            # Mask everything except the assistant's response
-            labels = torch.full_like(processed['input_ids'], -100)
-            
-            for i, (chat_text, target) in enumerate(zip(chat_texts, targets)):
-                # Find where the assistant response starts
-                # Look for the assistant role marker in the tokenized text
-                assistant_start = chat_text.find("assistant")
-                if assistant_start != -1:
-                    # Tokenize to find the position
-                    tokens = self.processor.tokenizer.encode(chat_text, add_special_tokens=False)
-                    assistant_tokens = self.processor.tokenizer.encode("assistant", add_special_tokens=False)
-                    
-                    # Find assistant token position
-                    for j in range(len(tokens) - len(assistant_tokens) + 1):
-                        if tokens[j:j+len(assistant_tokens)] == assistant_tokens:
-                            # Mask everything before assistant response
-                            labels[i, j+len(assistant_tokens):] = processed['input_ids'][i, j+len(assistant_tokens):]
-                            break
-                else:
-                    # Fallback: mask first 80% of tokens
-                    seq_len = processed['input_ids'][i].size(0)
-                    mask_start = int(seq_len * 0.8)
-                    if mask_start < seq_len:
-                        labels[i, mask_start:] = processed['input_ids'][i, mask_start:]
-            
-            processed['labels'] = labels
-            
-            # Keep pixel_values for HF LLaVA; also provide 'images' alias for LLaVA-Med
+
+            if 'input_ids' in processed:
+                labels = torch.full_like(processed['input_ids'], -100)
+                processed['labels'] = labels
             if 'pixel_values' in processed and 'images' not in processed:
                 processed['images'] = processed['pixel_values']
         else:
-            # Return raw data if no processor
             processed = {
-                'images': images,
-                'prompts': prompts,
-                'targets': targets,
+                'pixel_values': torch.stack([self.processor.image_processor(img) for img in images]) if self.processor else None,
+                'labels': None,
             }
-        
-        max_tok = getattr(self, "max_label_tokens", None)
-        if max_tok and 'input_ids' in processed and processed['input_ids'].size(1) > max_tok:
-            processed['input_ids'] = processed['input_ids'][:, :max_tok]
-            if 'attention_mask' in processed:
-                processed['attention_mask'] = processed['attention_mask'][:, :max_tok]
-            if 'position_ids' in processed:
-                processed['position_ids'] = processed['position_ids'][:, :max_tok]
-            if 'labels' in processed:
-                processed['labels'] = processed['labels'][:, :max_tok]
-        elif max_tok and 'labels' in processed and processed['labels'].size(1) > max_tok:
-            processed['labels'] = processed['labels'][:, :max_tok]
 
         processed['chexpert_targets'] = torch.stack(chexpert_targets)
         processed['chexpert_masks'] = torch.stack(chexpert_masks)
         processed['icd_targets'] = torch.stack(icd_targets)
         processed['icd_masks'] = torch.stack(icd_masks)
-        
-        # Note: mode, stage, study_id are metadata fields that should not be passed to the model
-        # They can be extracted from the batch items if needed for logging/curriculum control
-        
+
         return processed
 
 
