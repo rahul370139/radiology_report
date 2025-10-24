@@ -1,7 +1,7 @@
 # LLaVA-Med v1.6 LoRA top-up configuration (GPU-friendly / Colab-ready)
 
 # Base model + tokenizer
-base_model: "liuhaotian/llava-v1.6-mistral-7b"
+base_model: "microsoft/llava-med-v1.5-mistral-7b"
 model_type: "llava_mistral"
 
 # Dataset (paths relative to repo root)

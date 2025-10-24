@@ -39,45 +39,35 @@ from transformers import (
 )
 
 def setup_mps_aggressively():
-    """Aggressive MPS optimization - no CPU fallback unless absolutely necessary"""
-    
-    print("🔥 AGGRESSIVE MPS OPTIMIZATION")
+    """Select best available device (CUDA > MPS > CPU) and apply safe memory tweaks.
+
+    Note: On Colab/Paperspace we want CUDA if available. MPS-only tweaks are
+    retained but we no longer force CPU.
+    """
+
+    print("🔥 DEVICE SELECTION & MEMORY SETUP")
     print("=" * 50)
-    
-    # 1. Force CPU usage due to MPS compatibility issues
-    print("1️⃣ Forcing CPU usage due to MPS compatibility issues...")
-    if hasattr(torch.backends, 'mps'):
-        # Override MPS availability check to force CPU
-        original_is_available = torch.backends.mps.is_available
-        torch.backends.mps.is_available = lambda: False
-        print("   ✅ MPS disabled, using CPU")
-    
-    # 2. Set aggressive MPS environment variables
-    print("2️⃣ Setting aggressive MPS environment...")
-    os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
-    os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-    os.environ['PYTORCH_MPS_ALLOCATOR_POLICY'] = 'expandable_segments'
-    os.environ['PYTORCH_MPS_CACHE_ALLOCATOR'] = '1'
-    print("   ✅ MPS environment optimized")
-    
-    # 3. Memory optimization
-    print("3️⃣ Optimizing memory...")
+
+    # Memory cleanup
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     import gc
     gc.collect()
-    
-    # 4. Check MPS availability
-    print("4️⃣ Checking MPS availability...")
-    mps_available = torch.backends.mps.is_available()
-    print(f"   MPS Available: {mps_available}")
-    
-    # Force CPU usage due to MPS compatibility issues
-    print("5️⃣ Forcing CPU usage due to MPS compatibility issues...")
-    device = torch.device('cpu')
-    print("   ✅ Using CPU device")
-    print(f"🎯 CPU DEVICE READY: {device}")
-    return device
+
+    # Prefer CUDA (Colab/Paperspace), then fall back to MPS (macOS), then CPU
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        print("✅ Using CUDA device")
+        return device
+
+    # Minimal, safe MPS env hints (macOS only)
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+        print("✅ Using MPS device")
+        return torch.device('mps')
+
+    print("✅ Using CPU device")
+    return torch.device('cpu')
 
 from dataset import CHEXPERT_ORDER, ICD_ORDER, CurriculumDataset, StageMixDataset
 
