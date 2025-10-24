@@ -368,17 +368,30 @@ class AdvancedRadiologyTrainer:
             vision_cfg = getattr(cfg, "vision_config", None)
             if hasattr(self.processor, "tokenizer"):
                 self.processor.tokenizer.padding_side = "right"
+            patch_size = None
+            strategy = None
             if vision_cfg is not None:
                 patch_size = getattr(vision_cfg, "patch_size", None)
                 if patch_size is None and isinstance(vision_cfg, dict):
                     patch_size = vision_cfg.get("patch_size")
-                if patch_size is not None:
-                    setattr(self.processor, "patch_size", patch_size)
                 strategy = getattr(vision_cfg, "vision_feature_select_strategy", None)
                 if strategy is None and isinstance(vision_cfg, dict):
                     strategy = vision_cfg.get("vision_feature_select_strategy")
-                if strategy is not None:
-                    setattr(self.processor, "vision_feature_select_strategy", strategy)
+            image_processor = getattr(self.processor, "image_processor", None)
+            if patch_size is not None:
+                setattr(self.processor, "patch_size", patch_size)
+                if image_processor is not None:
+                    setattr(image_processor, "patch_size", patch_size)
+                    cfg_obj = getattr(image_processor, "config", None)
+                    if cfg_obj is not None:
+                        setattr(cfg_obj, "patch_size", patch_size)
+            if strategy is not None:
+                setattr(self.processor, "vision_feature_select_strategy", strategy)
+                if image_processor is not None:
+                    setattr(image_processor, "vision_feature_select_strategy", strategy)
+                    cfg_obj = getattr(image_processor, "config", None)
+                    if cfg_obj is not None:
+                        setattr(cfg_obj, "vision_feature_select_strategy", strategy)
         else:
             self.processor = self._create_llava_processor()
         
