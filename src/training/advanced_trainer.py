@@ -870,7 +870,8 @@ class AdvancedRadiologyTrainer:
     
     def create_training_arguments(self) -> TrainingArguments:
         """Create training arguments with advanced features"""
-        return TrainingArguments(
+        # Common kwargs supported across transformers versions
+        common_kwargs = dict(
             output_dir=self.config['output_dir'],
             per_device_train_batch_size=self.config['batch_size'],
             per_device_eval_batch_size=self.config.get('per_device_eval_batch_size', 2),
@@ -880,10 +881,9 @@ class AdvancedRadiologyTrainer:
             warmup_ratio=self.config['warmup_ratio'],
             weight_decay=self.config['weight_decay'],
             max_grad_norm=self.config['max_grad_norm'],
-            logging_dir=self.config['logging_dir'],
-            logging_steps=self.config['logging_steps'],
-            evaluation_strategy=self.config['evaluation_strategy'],
-            eval_steps=self.config['eval_steps'],
+            logging_dir=self.config.get('logging_dir', 'logs'),
+            logging_steps=self.config.get('logging_steps', 50),
+            eval_steps=self.config.get('eval_steps', 500),
             save_strategy=self.config['save_strategy'],
             save_steps=self.config['save_steps'],
             save_total_limit=self.config['save_total_limit'],
@@ -901,6 +901,19 @@ class AdvancedRadiologyTrainer:
             report_to=self.config.get('report_to', 'tensorboard'),
             run_name=f"radiology_curriculum_{self.config['seed']}"
         )
+
+        # Transformers <5 uses 'evaluation_strategy'; >=5 uses 'eval_strategy'
+        strategy = self.config.get('evaluation_strategy', 'steps')
+        try:
+            return TrainingArguments(
+                evaluation_strategy=strategy,
+                **common_kwargs,
+            )
+        except TypeError:
+            return TrainingArguments(
+                eval_strategy=strategy,
+                **common_kwargs,
+            )
     
     def train(self):
         """Main training loop with advanced curriculum learning and stage transitions"""
