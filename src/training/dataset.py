@@ -81,6 +81,7 @@ def convert_stage_b_to_stage_a(sample: Dict[str, Any]) -> Dict[str, Any]:
     if 'Sex' in patient:
         minimal['Sex'] = patient['Sex']
     clone['patient_data'] = minimal if minimal else None
+    clone['ehr_context'] = ""
     return clone
 
 def build_stage_mix_samples(
@@ -221,6 +222,7 @@ class CurriculumDataset(Dataset):
             image = Image.new('RGB', (336, 336), color='black')
         
         # Build prompt and target using structured templates
+        ehr_context = ""
         if sample['stage'] == 'A':
             # Stage A: Image-only with structured prompt
             prompt = """You are a radiology assistant. Analyze the chest X-ray and produce:
@@ -242,6 +244,7 @@ TASK:
             # Stage B: Image + EHR with structured prompt
             patient_data = sample.get('patient_data', {})
             ehr_data = self._format_ehr_data(patient_data)
+            ehr_context = ehr_data
             prompt = f"""EHR:
 {ehr_data}
 
@@ -278,6 +281,7 @@ TASK:
             'stage': sample['stage'],
             'study_id': study_id,
             'image_path': str(image_path),
+            'ehr_context': ehr_context,
             'chexpert_target': chexpert_vec,
             'chexpert_mask': chexpert_mask,
             'icd_target': icd_vec,
@@ -479,27 +483,24 @@ TASK:
         if self.processor is not None:
             # Build chat template messages for each sample
             chat_texts = []
-            for i, (prompt, target, mode) in enumerate(zip(prompts, targets, [item['mode'] for item in batch])):
-                # Extract EHR context if present
-                has_ehr = mode == 'image_ehr'
-                ehr_block = ""
-                if has_ehr and 'ehr_context' in batch[i]:
-                    ehr_block = batch[i]['ehr_context'] + "\n"
-                
-                # Build messages using chat template (must alternate user/assistant only)
+            for i, item in enumerate(batch):
+                has_ehr = item['mode'] == 'image_ehr'
+                user_content = []
+                if has_ehr and item.get('ehr_context'):
+                    user_content.append({"type": "text", "text": item['ehr_context'] + "\n"})
+                user_content.append({"type": "image"})
+                user_content.append({"type": "text", "text": "Provide:\nImpression:\nCheXpert:\nICD:"})
                 messages = [
-                    {"role": "user", "content": (ehr_block + "\n" if has_ehr else "") + "<image>\n"
-                                              "Provide:\nImpression:\nCheXpert:\nICD:"},
-                    {"role": "assistant", "content": target}
+                    {"role": "user", "content": user_content},
+                    {"role": "assistant", "content": [{"type": "text", "text": item['target']}]},
                 ]
-                
-                # Apply chat template
-                text = self.processor.tokenizer.apply_chat_template(
-                    messages,
-                    add_generation_prompt=False,
-                    tokenize=False
+                chat_texts.append(
+                    self.processor.apply_chat_template(
+                        messages,
+                        add_generation_prompt=False,
+                        tokenize=False,
+                    )
                 )
-                chat_texts.append(text)
             
             # Process images and text together
             processed = self.processor(
