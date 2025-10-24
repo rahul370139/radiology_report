@@ -37,6 +37,7 @@ from transformers import (
     TrainingArguments,
     TrainerCallback,
 )
+from transformers import BitsAndBytesConfig
 
 def setup_mps_aggressively():
     """Select best available device (CUDA > MPS > CPU) and apply safe memory tweaks.
@@ -403,7 +404,8 @@ class AdvancedRadiologyTrainer:
         
         # dtype selection: float16 on CUDA, fp32 otherwise
         dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        load_in_8bit = bool(self.config.get('load_in_8bit', False)) and torch.cuda.is_available()
+        use_8bit = bool(self.config.get('load_in_8bit', False)) and torch.cuda.is_available()
+        quantization_config = BitsAndBytesConfig(load_in_8bit=True) if use_8bit else None
         device_map = "auto" if torch.cuda.is_available() else None
         
         try:
@@ -438,11 +440,15 @@ class AdvancedRadiologyTrainer:
             logger.warning("LLaVA-Med specific import failed, trying standard transformers...")
             if is_hf_llava:
                 # HF LLaVA (vision-to-seq) path; let Accelerate dispatch handle placement
-                self.model = AutoModelForVision2Seq.from_pretrained(
+                try:
+                    from transformers import AutoModelForImageTextToText as _AutoV2S
+                except Exception:
+                    from transformers import AutoModelForVision2Seq as _AutoV2S
+                self.model = _AutoV2S.from_pretrained(
                     base_id,
-                    torch_dtype=dtype,
+                    dtype=dtype,
                     device_map=device_map,
-                    load_in_8bit=load_in_8bit,
+                    quantization_config=quantization_config,
                     low_cpu_mem_usage=True,
                     trust_remote_code=True,
                 )
@@ -451,22 +457,11 @@ class AdvancedRadiologyTrainer:
                     base_id,
                     torch_dtype=dtype,
                     device_map=device_map,
-                    load_in_8bit=load_in_8bit,
+                    quantization_config=quantization_config,
                     low_cpu_mem_usage=True,
                     trust_remote_code=True,
                 )
-            
-            # Apply MPS optimization
-            self.model = self.model.to(self.device)
-            self.model.float()
-            
-            for param in self.model.parameters():
-                param.data = param.data.to(self.device).float()
-            
-            for buffer in self.model.buffers():
-                buffer.data = buffer.data.to(self.device).float()
-            
-            logger.info(f"✅ Model loaded with MPS optimization (dtype: {dtype})")
+            logger.info(f"✅ Model loaded (dtype: {dtype}, device_map: {device_map}, 8bit: {use_8bit})")
         
         # Configure model
         self.model.config.use_cache = False
@@ -477,10 +472,11 @@ class AdvancedRadiologyTrainer:
 
         print(f"   🎯 Model ready on {self.device}")
 
-        # If Accelerate attached device_map hooks, do not move the model manually
+        # If Accelerate/quantization attached hooks, do not move the model
         hf_device_map = getattr(self.model, 'hf_device_map', None)
-        if not hf_device_map:
-            # For non-accelerate paths, enforce dtype/device
+        is_8bit_loaded = bool(getattr(self.model, 'is_loaded_in_8bit', False))
+        is_4bit_loaded = bool(getattr(self.model, 'is_loaded_in_4bit', False))
+        if not (hf_device_map or is_8bit_loaded or is_4bit_loaded):
             if dtype == torch.float16 and self.device.type == 'cuda':
                 self.model.half()
             else:
