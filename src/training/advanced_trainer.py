@@ -97,10 +97,8 @@ class StageMixCallback(TrainerCallback):
         return control
 
 class AdvancedCurriculumTrainer(Trainer):
-    """
-    Custom trainer with stage transition logic and curriculum learning
-    """
-    
+    """Custom trainer with curriculum metadata and auxiliary loss."""
+
     def __init__(self, config, curriculum_sampler, stage_split_step, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.config = config
@@ -108,7 +106,7 @@ class AdvancedCurriculumTrainer(Trainer):
         self.stage_split_step = stage_split_step
         self.current_stage = "A"
         self.checkpoint_a_saved = False
-    
+
     def compute_loss(self, model, inputs, return_outputs=False):
         """Compute combined generative + auxiliary classification loss."""
         inputs = inputs.copy()
@@ -228,67 +226,7 @@ class AdvancedCurriculumTrainer(Trainer):
         loss = bce.sum() / valid.clamp(min=1.0)
         return loss
         
-    def training_step(self, model, inputs):
-        """Override training step to handle stage transitions and MPS optimization"""
-        # Check for stage transition
-        if not self.checkpoint_a_saved and self.state.global_step >= self.stage_split_step:
-            self._transition_to_stage_b()
-        
-        # Update curriculum sampler step
-        if self.curriculum_sampler:
-            self.curriculum_sampler.update_step(self.state.global_step)
-        
-        # CPU optimization: ensure all inputs are on CPU device
-        device = torch.device('cpu')
-        inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-        
-        # CRITICAL: Ensure model is on MPS device
-        if hasattr(model, 'to'):
-            model = model.to(device)
-        # Ensure all model parameters are on MPS
-        for param in model.parameters():
-            if param.device != device:
-                param.data = param.data.to(device)
-        
-        # CRITICAL: Force mm_projector to MPS device - AGGRESSIVE APPROACH
-        try:
-            # Method 1: Direct access
-            if hasattr(model, 'get_model'):
-                base_model = model.get_model()
-                if hasattr(base_model, 'mm_projector'):
-                    base_model.mm_projector = base_model.mm_projector.to(device)
-                    for param in base_model.mm_projector.parameters():
-                        param.data = param.data.to(device)
-                    for buffer in base_model.mm_projector.buffers():
-                        buffer.data = buffer.data.to(device)
-            
-            # Method 2: Through base_model attribute
-            if hasattr(model, 'base_model'):
-                if hasattr(model.base_model, 'model') and hasattr(model.base_model.model, 'mm_projector'):
-                    model.base_model.model.mm_projector = model.base_model.model.mm_projector.to(device)
-                    for param in model.base_model.model.mm_projector.parameters():
-                        param.data = param.data.to(device)
-                    for buffer in model.base_model.model.mm_projector.buffers():
-                        buffer.data = buffer.data.to(device)
-            
-            # Method 3: Recursive search and move
-            def move_to_device(module, device):
-                module.to(device)
-                for child in module.children():
-                    move_to_device(child, device)
-            
-            if hasattr(model, 'get_model'):
-                move_to_device(model.get_model(), device)
-                
-        except Exception as e:
-            print(f"⚠️ MPS device move warning in training step: {e}")
-            # Force fallback to CPU if MPS fails
-            device = torch.device('cpu')
-            model = model.to(device)
-            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-        
-        # Call parent training step
-        return super().training_step(model, inputs)
+    # Note: Rely on Trainer.training_step (version-compatible) and our compute_loss override
     
     def _transition_to_stage_b(self):
         """Transition from Stage A to Stage B"""
