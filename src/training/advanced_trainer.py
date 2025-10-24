@@ -384,33 +384,38 @@ class AdvancedRadiologyTrainer:
         logger.info("=" * 70)
         logger.info(f"Model: {self.config['base_model']}")
         
+        base_id = self.config['base_model']
         # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.config['base_model'],
-            trust_remote_code=True
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(base_id, trust_remote_code=True)
         
-        # Create LLaVA-Med specific processor
-        self.processor = self._create_llava_processor()
+        # Load config first to decide correct model class
+        from transformers import AutoConfig, AutoModelForVision2Seq
+        cfg = AutoConfig.from_pretrained(base_id, trust_remote_code=True)
+        model_type = str(getattr(cfg, 'model_type', '')).lower()
+        architectures = [a.lower() for a in (getattr(cfg, 'architectures', []) or [])]
+        is_hf_llava = ('llava' in model_type) or any('llava' in a for a in architectures)
         
-        # Load model with MPS-optimized settings - force float32 for MPS
-        dtype = torch.float32  # Always use float32 for MPS compatibility
+        # Use HF AutoProcessor for HF LLaVA variants; else use custom processor
+        if is_hf_llava:
+            self.processor = AutoProcessor.from_pretrained(base_id, trust_remote_code=True)
+        else:
+            self.processor = self._create_llava_processor()
+        
+        # dtype selection: float16 on CUDA, fp32 otherwise
+        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         
         try:
             # Try LLaVA-Med specific model loading
             from llava.model.language_model.llava_mistral import LlavaMistralForCausalLM
-            
-            self.model = LlavaMistralForCausalLM.from_pretrained(
-                self.config['base_model'],
-                torch_dtype=dtype,
-                device_map=None,  # Load to CPU first
-                trust_remote_code=True,
-            )
+            self.model = LlavaMistralForCausalLM.from_pretrained(base_id, torch_dtype=dtype, device_map=None, trust_remote_code=True)
             
             # AGGRESSIVE MPS optimization
             print("   Applying aggressive MPS optimizations...")
             self.model = self.model.to(self.device)
-            self.model.float()  # Force float32
+            if dtype == torch.float16 and self.device.type == 'cuda':
+                self.model.half()
+            else:
+                self.model.float()
             
             # Ensure all parameters are on MPS and float32
             for param in self.model.parameters():
@@ -424,12 +429,21 @@ class AdvancedRadiologyTrainer:
             
         except ImportError:
             logger.warning("LLaVA-Med specific import failed, trying standard transformers...")
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.config['base_model'],
-                torch_dtype=dtype,
-                device_map=None,
-                trust_remote_code=True,
-            )
+            if is_hf_llava:
+                # HF LLaVA uses vision2seq class
+                self.model = AutoModelForVision2Seq.from_pretrained(
+                    base_id,
+                    torch_dtype=dtype,
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
+            else:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    base_id,
+                    torch_dtype=dtype,
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
             
             # Apply MPS optimization
             self.model = self.model.to(self.device)
@@ -445,7 +459,10 @@ class AdvancedRadiologyTrainer:
         
         # Configure model for MPS training
         self.model.config.use_cache = False
-        torch.set_float32_matmul_precision("high")
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
         
         # Additional MPS optimizations
         if hasattr(torch.mps, 'empty_cache'):

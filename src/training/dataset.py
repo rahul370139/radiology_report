@@ -539,9 +539,9 @@ TASK:
             
             processed['labels'] = labels
             
-            # Rename pixel_values to images for LLaVA-Med compatibility
-            if 'pixel_values' in processed:
-                processed['images'] = processed.pop('pixel_values')
+            # Keep pixel_values for HF LLaVA; also provide 'images' alias for LLaVA-Med
+            if 'pixel_values' in processed and 'images' not in processed:
+                processed['images'] = processed['pixel_values']
         else:
             # Return raw data if no processor
             processed = {
