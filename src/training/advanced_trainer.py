@@ -954,6 +954,7 @@ class AdvancedRadiologyTrainer:
         
         # Start training
         logger.info("Starting training with advanced curriculum learning...")
+        self._patch_accelerate_optimizer()
         self.trainer.train()
         
         # Save final model
@@ -972,7 +973,22 @@ class AdvancedRadiologyTrainer:
         logger.info("=" * 70)
         logger.info("✅ TRAINING COMPLETED SUCCESSFULLY!")
         logger.info("=" * 70)
-    
+
+    def _patch_accelerate_optimizer(self) -> None:
+        """Ensure Accelerate-wrapped optimizers expose a safe train()"""
+        opt = getattr(self.trainer, "optimizer", None)
+        if opt is None:
+            return
+        base_opt = getattr(opt, "optimizer", None)
+
+        def safe_train(self_opt, *args, **kwargs):
+            if base_opt is not None and hasattr(base_opt, "train"):
+                return base_opt.train(*args, **kwargs)
+            return None
+
+        if hasattr(opt, "train"):
+            opt.train = types.MethodType(safe_train, opt)
+
     def _is_valid_json(self, text: str) -> bool:
         """Check if text contains valid JSON blocks"""
         try:

@@ -6,7 +6,7 @@ base_model: "llava-hf/llava-v1.6-mistral-7b-hf"
 # Dataset (paths relative to repo root)
 dataset_path: "src/data/processed/curriculum_train_final_clean.jsonl"
 validation_path: "src/data/processed/curriculum_val_final_clean.jsonl"
-image_root: "."
+image_root: "/content/radiology_report"
 
 # Disable curriculum sampler for faster GPU runs
 curriculum_learning: false
