@@ -448,14 +448,25 @@ class AdvancedRadiologyTrainer:
                     from transformers import AutoModelForImageTextToText as _AutoV2S
                 except Exception:
                     from transformers import AutoModelForVision2Seq as _AutoV2S
-                self.model = _AutoV2S.from_pretrained(
-                    base_id,
-                    dtype=dtype,
-                    device_map=device_map,
-                    quantization_config=quantization_config,
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=True,
-                )
+                # Prefer torch_dtype for Transformers <5; fallback to dtype for 5+
+                try:
+                    self.model = _AutoV2S.from_pretrained(
+                        base_id,
+                        torch_dtype=dtype,
+                        device_map=device_map,
+                        quantization_config=quantization_config,
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=True,
+                    )
+                except TypeError:
+                    self.model = _AutoV2S.from_pretrained(
+                        base_id,
+                        dtype=dtype,
+                        device_map=device_map,
+                        quantization_config=quantization_config,
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=True,
+                    )
             else:
                 self.model = AutoModelForCausalLM.from_pretrained(
                     base_id,
