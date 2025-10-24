@@ -114,7 +114,7 @@ class AdvancedCurriculumTrainer(Trainer):
         self.current_stage = "A"
         self.checkpoint_a_saved = False
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """Compute combined generative + auxiliary classification loss."""
         inputs = inputs.copy()
         chexpert_targets = inputs.pop('chexpert_targets', None)
