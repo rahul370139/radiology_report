@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import types
 import torch.nn.functional as F
 import yaml
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel
@@ -225,6 +226,21 @@ class AdvancedCurriculumTrainer(Trainer):
         bce = bce * mask
         loss = bce.sum() / valid.clamp(min=1.0)
         return loss
+
+    def create_optimizer_and_scheduler(self, num_training_steps: int):
+        super().create_optimizer_and_scheduler(num_training_steps)
+        opt = getattr(self, "optimizer", None)
+        if opt is None or not hasattr(opt, "train"):
+            return
+
+        base_opt = getattr(opt, "optimizer", None)
+
+        def _safe_train(self_opt):
+            if base_opt is not None and hasattr(base_opt, "train"):
+                return base_opt.train()
+            return None
+
+        opt.train = types.MethodType(_safe_train, opt)
         
     # Note: Rely on Trainer.training_step (version-compatible) and our compute_loss override
     
@@ -340,14 +356,13 @@ class AdvancedRadiologyTrainer:
         else:
             self.processor = self._create_llava_processor()
         
-        # dtype selection: float16 on CUDA, fp32 otherwise
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        # dtype selection: prefer bf16 on CUDA, fallback to fp32 otherwise
+        dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
         use_8bit = bool(self.config.get('load_in_8bit', False)) and torch.cuda.is_available()
         modules_to_skip = self.config.get('llm_int8_skip_modules', ["multi_modal_projector"])
-        quantization_config = (
-            BitsAndBytesConfig(load_in_8bit=True, llm_int8_skip_modules=modules_to_skip)
-            if use_8bit else None
-        )
+        quantization_config = None
+        if use_8bit:
+            quantization_config = BitsAndBytesConfig(load_in_8bit=True, llm_int8_skip_modules=modules_to_skip)
         device_map = "auto" if torch.cuda.is_available() else None
         
         try:
@@ -401,7 +416,15 @@ class AdvancedRadiologyTrainer:
                         base_id,
                         dtype=dtype,
                         device_map=device_map,
-                        quantization_config=quantization_config,
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=True,
+                    )
+                except ImportError as e:
+                    logger.warning(f"Retrying HF LLaVA load without quantization due to: {e}")
+                    self.model = _AutoV2S.from_pretrained(
+                        base_id,
+                        torch_dtype=dtype,
+                        device_map=device_map,
                         low_cpu_mem_usage=True,
                         trust_remote_code=True,
                     )
@@ -414,7 +437,12 @@ class AdvancedRadiologyTrainer:
                     low_cpu_mem_usage=True,
                     trust_remote_code=True,
                 )
-            logger.info(f"✅ Model loaded (dtype: {dtype}, device_map: {device_map}, 8bit: {use_8bit})")
+            logger.info(
+                "✅ Model loaded (dtype=%s, device_map=%s, quant=%s)",
+                dtype,
+                device_map,
+                quantization_config is not None,
+            )
         
         # Configure model
         self.model.config.use_cache = False
