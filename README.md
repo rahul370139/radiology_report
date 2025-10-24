@@ -67,97 +67,76 @@
 
 ---
 
-## 🚨 **CURRENT ISSUES & DEBUGGING**
+## ⚙️ **RUNTIME CONFIGURATION (DEFAULTS)**
 
-### **Known Issues in v1.0**
-1. **Zero Value Problem**: Model generates all CheXpert/ICD labels as 0
-   - **Root Cause**: Multi-pass generation not fully optimized
-   - **Impact**: All structured metrics show 0.0 F1 scores
-   - **Status**: Under investigation
+The demo and evaluation scripts read configuration from environment variables. We ship sensible defaults that balance precision and recall:
 
-2. **JSON Format Challenges**: Model sometimes generates plain text instead of JSON
-   - **Solution**: Multi-pass strategy implemented
-   - **Status**: Partially resolved, needs fine-tuning
+```bash
+# recommended defaults (already set inside app_demo.py)
+export USE_MERGED_WEIGHTS=true
+export MERGED_WEIGHTS_PATH=checkpoints/merged/main_merged
+export CHEXPERT_VOTE=1
+export ICD_VOTE=1
+export CHEXPERT_POSITIVE_BIAS=4.0
+export CHEXPERT_NEGATIVE_BIAS=-0.5
+export ICD_POSITIVE_BIAS=4.0
+export ICD_NEGATIVE_BIAS=-0.5
+export CHEXPERT_DO_SAMPLE=true
+export ICD_DO_SAMPLE=true
+export CHEXPERT_TEMPERATURE=0.75
+export ICD_TEMPERATURE=0.75
+export CHEXPERT_MAX_NEW_TOKENS=140
+export ICD_MAX_NEW_TOKENS=100
+export IMP_MAX_NEW_TOKENS=120
+export ENABLE_LABEL_KEYWORDS=true
+```
 
-3. **Ground Truth Display**: White circles hard to see in UI
-   - **Solution**: Color-coded labels with backgrounds implemented
-   - **Status**: ✅ Fixed in v1.0
+The Streamlit app applies these values automatically via `os.environ.setdefault(...)`. Override them before launching if you need to experiment with different decoding strategies.
 
 ---
 
-## 🚀 **NEXT STEPS - V2.0 ROADMAP**
+## ✅ **CURRENT PERFORMANCE SNAPSHOT**
 
-### **Priority 1: Model Performance**
-- **Debug Zero Values**: Investigate why all labels predict 0
-- **Prompt Engineering**: Optimize multi-pass generation prompts
-- **Checkpoint Testing**: Try different checkpoints (step 50, 100)
-- **Generation Parameters**: Tune temperature, top_p, max_tokens
+### Quick manifest (2×Stage A + 2×Stage B)
+- **Stage B CheXpert micro-F1**: **0.75** (Precision 1.00, Recall 0.60)
+- **Stage B ICD micro-F1**: **1.00**
 
-### **Priority 2: Evaluation Enhancement**
-- **Metrics Validation**: Ensure proper F1 score computation
-- **A/B Testing**: Comprehensive comparison of different approaches
-- **Error Analysis**: Detailed failure case analysis
-- **Performance Benchmarking**: Speed and accuracy optimization
+### Extended Stage B validation (8 samples from curriculum_val JSONL)
+- **CheXpert micro-F1**: **0.11** (Precision 0.17, Recall 0.08)
+- **ICD micro-F1**: **0.50** (Precision 1.00, Recall 0.33)
 
-### **Priority 3: Production Features**
-- **Model Serving**: API endpoint for production use
-- **Batch Processing**: Large-scale evaluation pipeline
-- **Monitoring**: Real-time performance tracking
-- **Documentation**: API documentation and user guides
-
-### **Priority 4: Advanced Features**
-- **Multi-Modal EHR**: Incorporate more EHR data types
-- **Confidence Scoring**: Uncertainty quantification
-- **Explanation Generation**: Why certain diagnoses were made
-- **Clinical Validation**: Expert radiologist review
+> The quick manifest highlights best-case behaviour, while the extended Stage B split surfaces remaining recall gaps. Heuristics and token biasing improved positives substantially, but we still need a lightweight auxiliary fine-tune (see roadmap below) to lift Stage A and the harder Stage B cases.
 
 ---
 
-## 🛠️ **TECHNICAL DEBUGGING GUIDE**
+## 🧪 **EVALUATION COMMANDS**
 
-### **Debugging Zero Values**
 ```bash
-# Test different checkpoints
-export LORA_DIR="checkpoints/checkpoint-50"
-python src/evaluation/eval_batch_simple.py --manifest evaluation/demo_manifest_smoke.csv
+# Quick sanity check (2×A + 2×B)
+python src/evaluation/eval_batch_simple.py \
+  --manifest evaluation/demo_manifest_quick.csv \
+  --output_dir evaluation/results_quick_main \
+  --device cpu
 
-# Test different generation parameters
-export GEN_TEMPERATURE=0.1
-export GEN_MAX_NEW_TOKENS=256
-export GEN_STRICT_JSON=true
+# Extended Stage B sweep (8 samples pulled from curriculum_val)
+python src/evaluation/eval_batch_simple.py \
+  --manifest evaluation/stageB_eval_manifest.csv \
+  --output_dir evaluation/results_stageB_eval \
+  --device cpu
 ```
 
-### **Model Performance Analysis**
-```bash
-# Run comprehensive evaluation
-python src/evaluation/eval_ab.py --val src/data/processed/curriculum_val_final_clean.jsonl
-
-# Test individual samples
-python test_simple_generation.py
-```
-
-### **UI Testing**
-```bash
-# Start demo app
-streamlit run app_demo.py --server.port 8501 --server.address 0.0.0.0
-# Access at: http://your-server-ip:8501
-```
+The Stage B manifest is generated under `evaluation/stageB_eval/` and ships with EHR JSON copies. Use these commands after setting the env defaults listed above.
 
 ---
 
-## 📈 **PERFORMANCE METRICS**
+## 🗺️ **ROADMAP (NEXT ITERATION)**
 
-### **Current v1.0 Performance**
-- **ROUGE-1**: 0.22 (decent text similarity)
-- **ROUGE-2**: 0.0 (no 2-gram overlap)
-- **BLEU**: 0.0 (no n-gram precision)
-- **CheXpert F1**: 0.0 (all labels predict 0)
-- **ICD F1**: 0.0 (all labels predict 0)
+1. **Stage A auxiliary loss** – run a short LoRA top-up (BCE on CheXpert/ICD tokens, unfreeze projector / last vision layers) so Support Devices and other positives no longer collapse to zero.
+2. **Self-consistency sweep** – on a larger machine, test `CHEXPERT_VOTE=3`, `ICD_VOTE=3` to quantify the recall boost from stochastic voting (no extra heuristics).
+3. **ICD vocabulary expansion** – we mapped the most frequent prefixes (J18, J94, J93, J81, etc.). Continue mining the validation JSONL to add any emerging codes and keep evaluation aligned with clinical labels.
+4. **Streamlit polish** – expose temperature/threshold toggles in the sidebar for advanced users, while keeping the defaults above active out of the box.
 
-### **Target v2.0 Performance**
-- **ROUGE-1**: >0.4 (improved text similarity)
-- **ROUGE-2**: >0.2 (better 2-gram overlap)
-- **BLEU**: >0.1 (improved n-gram precision)
+---
 - **CheXpert F1**: >0.3 (meaningful label predictions)
 - **ICD F1**: >0.2 (clinical relevance)
 

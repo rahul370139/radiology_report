@@ -18,6 +18,29 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 from inference.pipeline import generate, get_pipeline, ICD
 
+# Default runtime parameters for demo (can be overridden via env)
+_STREAMLIT_DEFAULT_ENV = {
+    "USE_MERGED_WEIGHTS": "true",
+    "MERGED_WEIGHTS_PATH": "checkpoints/merged/main_merged",
+    "CHEXPERT_VOTE": "1",
+    "ICD_VOTE": "1",
+    "CHEXPERT_POSITIVE_BIAS": "4.0",
+    "CHEXPERT_NEGATIVE_BIAS": "-0.5",
+    "ICD_POSITIVE_BIAS": "4.0",
+    "ICD_NEGATIVE_BIAS": "-0.5",
+    "CHEXPERT_DO_SAMPLE": "true",
+    "ICD_DO_SAMPLE": "true",
+    "CHEXPERT_TEMPERATURE": "0.75",
+    "ICD_TEMPERATURE": "0.75",
+    "CHEXPERT_MAX_NEW_TOKENS": "140",
+    "ICD_MAX_NEW_TOKENS": "100",
+    "IMP_MAX_NEW_TOKENS": "120",
+    "ENABLE_LABEL_KEYWORDS": "true",
+}
+
+for key, value in _STREAMLIT_DEFAULT_ENV.items():
+    os.environ.setdefault(key, value)
+
 # Page config
 st.set_page_config(
     page_title="Radiology Report Generator",

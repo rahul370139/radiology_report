@@ -14,25 +14,29 @@ except ImportError:
     pass
 
 import json
-import os
-import torch
 import logging
-import numpy as np
+import os
+import re
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import yaml
+from peft import LoraConfig, TaskType, get_peft_model, PeftModel
+from sklearn.metrics import accuracy_score, f1_score
 from torch.utils.data import DataLoader
 from transformers import (
-    AutoTokenizer, 
-    AutoProcessor,
     AutoModelForCausalLM,
-    TrainingArguments,
+    AutoProcessor,
+    AutoTokenizer,
+    EarlyStoppingCallback,
     Trainer,
-    EarlyStoppingCallback
+    TrainingArguments,
+    TrainerCallback,
 )
-from peft import LoraConfig, get_peft_model, TaskType
-import yaml
-from sklearn.metrics import f1_score, accuracy_score
-import re
 
 def setup_mps_aggressively():
     """Aggressive MPS optimization - no CPU fallback unless absolutely necessary"""
@@ -75,7 +79,7 @@ def setup_mps_aggressively():
     print(f"🎯 CPU DEVICE READY: {device}")
     return device
 
-from dataset import CurriculumDataset
+from dataset import CHEXPERT_ORDER, ICD_ORDER, CurriculumDataset, StageMixDataset
 
 # Import from correct path
 import sys
@@ -86,9 +90,20 @@ from advanced_curriculum import (
     create_advanced_curriculum_dataset,
     create_json_drift_prevention
 )
-from transformers import Trainer
-
 logger = logging.getLogger(__name__)
+
+class StageMixCallback(TrainerCallback):
+    """Rebuilds the Stage-mixed dataset at the start of each epoch."""
+
+    def __init__(self, dataset: StageMixDataset, seed: int):
+        self.dataset = dataset
+        self.seed = seed
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        epoch_idx = int(state.epoch) if state.epoch is not None else 0
+        rebuild_seed = self.seed + epoch_idx
+        self.dataset.rebuild(rebuild_seed)
+        return control
 
 class AdvancedCurriculumTrainer(Trainer):
     """
@@ -102,6 +117,125 @@ class AdvancedCurriculumTrainer(Trainer):
         self.stage_split_step = stage_split_step
         self.current_stage = "A"
         self.checkpoint_a_saved = False
+    
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """Compute combined generative + auxiliary classification loss."""
+        inputs = inputs.copy()
+        chexpert_targets = inputs.pop('chexpert_targets', None)
+        chexpert_masks = inputs.pop('chexpert_masks', None)
+        icd_targets = inputs.pop('icd_targets', None)
+        icd_masks = inputs.pop('icd_masks', None)
+        
+        # Ensure dict output with hidden states for auxiliary heads
+        inputs['output_hidden_states'] = True
+        inputs['return_dict'] = True
+        outputs = model(**inputs)
+        base_loss = outputs.loss
+        if base_loss is None:
+            logits = outputs.logits
+            labels = inputs.get('labels')
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous() if labels is not None else None
+            if shift_labels is None:
+                raise RuntimeError("Labels required to compute base loss are missing.")
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            base_loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1)
+            )
+        
+        total_loss = base_loss
+        aux_losses: Dict[str, torch.Tensor] = {}
+        aux_cfg = self.config.get('aux_loss', {})
+        labels_tensor = inputs.get('labels')
+        
+        if outputs.hidden_states is None:
+            raise RuntimeError("Model did not return hidden states; set output_hidden_states=True.")
+        pooled = self._pool_hidden_states(outputs.hidden_states[-1], labels_tensor)
+        device = pooled.device
+        
+        if chexpert_targets is not None and hasattr(model, "chexpert_head"):
+            chexpert_targets = chexpert_targets.to(device)
+            chexpert_masks = chexpert_masks.to(device) if chexpert_masks is not None else None
+            chexpert_logits = model.chexpert_head(pooled)
+            loss_cfg = aux_cfg.get('chexpert', {})
+            aux_loss = self._compute_auxiliary_loss(
+                chexpert_logits,
+                chexpert_targets,
+                chexpert_masks,
+                loss_cfg
+            )
+            if aux_loss is not None:
+                weight = loss_cfg.get('weight', 0.5)
+                total_loss = total_loss + weight * aux_loss
+                aux_losses['chexpert_aux'] = aux_loss.detach()
+        
+        if icd_targets is not None and hasattr(model, "icd_head"):
+            icd_targets = icd_targets.to(device)
+            icd_masks = icd_masks.to(device) if icd_masks is not None else None
+            icd_logits = model.icd_head(pooled)
+            loss_cfg = aux_cfg.get('icd', {})
+            aux_loss = self._compute_auxiliary_loss(
+                icd_logits,
+                icd_targets,
+                icd_masks,
+                loss_cfg
+            )
+            if aux_loss is not None:
+                weight = loss_cfg.get('weight', 0.4)
+                total_loss = total_loss + weight * aux_loss
+                aux_losses['icd_aux'] = aux_loss.detach()
+        
+        if aux_losses and self.state.global_step % max(1, self.args.logging_steps) == 0:
+            for name, value in aux_losses.items():
+                self.log({name: value.item()})
+        
+        if return_outputs:
+            outputs.loss = total_loss
+            return total_loss, outputs
+        return total_loss
+    
+    def _pool_hidden_states(self, last_hidden_state: torch.Tensor, labels: Optional[torch.Tensor]) -> torch.Tensor:
+        """Average hidden states over the assistant tokens (labels != -100)."""
+        if labels is None:
+            return last_hidden_state.mean(dim=1)
+        mask = (labels != -100).float().to(last_hidden_state.device)
+        denom = mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+        pooled = (last_hidden_state * mask.unsqueeze(-1)).sum(dim=1) / denom
+        return pooled
+    
+    def _compute_auxiliary_loss(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        cfg: Dict[str, Any],
+    ) -> Optional[torch.Tensor]:
+        """Compute BCE/Focal auxiliary loss for structured labels."""
+        if mask is None:
+            mask = torch.ones_like(targets)
+        valid = mask.sum()
+        if valid.item() == 0:
+            return None
+        
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        
+        gamma = cfg.get('focal_gamma', 0.0)
+        if gamma and gamma > 0:
+            probs = torch.sigmoid(logits)
+            focal_pos = (1 - probs).clamp(min=1e-4) ** gamma
+            focal_neg = probs.clamp(min=1e-4) ** gamma
+            focal = torch.where(targets > 0.5, focal_pos, focal_neg)
+            bce = bce * focal
+        
+        pos_weight = cfg.get('pos_weight', 1.0)
+        if pos_weight and pos_weight > 1.0:
+            weight_tensor = torch.where(targets > 0.5, torch.full_like(targets, pos_weight), torch.ones_like(targets))
+            bce = bce * weight_tensor
+        
+        bce = bce * mask
+        loss = bce.sum() / valid.clamp(min=1.0)
+        return loss
         
     def training_step(self, model, inputs):
         """Override training step to handle stage transitions and MPS optimization"""
@@ -220,6 +354,19 @@ class AdvancedRadiologyTrainer:
         print("=" * 50)
         self.device = setup_mps_aggressively()
         print(f"✅ Using device: {self.device}")
+        
+        # Ensure auxiliary loss configuration exists with sane defaults
+        aux_cfg = self.config.setdefault('aux_loss', {})
+        aux_cfg.setdefault('chexpert', {})
+        aux_cfg.setdefault('icd', {})
+        aux_cfg['chexpert'].setdefault('weight', 0.5)
+        aux_cfg['chexpert'].setdefault('pos_weight', 3.0)
+        aux_cfg['chexpert'].setdefault('focal_gamma', 0.0)
+        aux_cfg['icd'].setdefault('weight', 0.4)
+        aux_cfg['icd'].setdefault('pos_weight', 2.5)
+        aux_cfg['icd'].setdefault('focal_gamma', 0.0)
+        self.config.setdefault('unfreeze_language_layers', 2)
+        self.config.setdefault('unfreeze_projector', True)
         
         # Initialize components
         self.tokenizer = None
@@ -387,6 +534,13 @@ class AdvancedRadiologyTrainer:
         if self.config.get('use_lora', True):
             self._setup_lora()
         
+        # Attach auxiliary heads and unfreeze selected backbone layers for top-up training
+        self._attach_auxiliary_heads()
+        self._unfreeze_language_backbone()
+        
+        # Ensure model produces hidden states for auxiliary supervision
+        self.model.config.output_hidden_states = True
+        
         logger.info("Model and tokenizer setup complete")
     
     def _create_llava_processor(self):
@@ -486,19 +640,41 @@ class AdvancedRadiologyTrainer:
     
     def _setup_lora(self):
         """Setup LoRA configuration with proper parameter management"""
-        lora_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=self.config['lora_r'],
-            lora_alpha=self.config['lora_alpha'],
-            lora_dropout=self.config['lora_dropout'],
-            target_modules=[
-                "q_proj", "v_proj", "k_proj", "o_proj",
-                "gate_proj", "up_proj", "down_proj"
-                # Removed "mm_projector" as it's a Sequential module not supported by LoRA
-            ]
-        )
-        
-        self.model = get_peft_model(self.model, lora_config)
+        resume_lora_path = self.config.get('lora_checkpoint_path')
+        resume_dir = Path(resume_lora_path) if resume_lora_path else None
+        loaded_existing = False
+        if resume_dir and resume_dir.exists():
+            logger.info(f"🔁 Loading existing LoRA adapter from {resume_dir.resolve()}")
+            self.model = PeftModel.from_pretrained(
+                self.model,
+                resume_dir,
+                is_trainable=True,
+                adapter_name="default"
+            )
+            loaded_existing = True
+        else:
+            target_modules = self.config.get(
+                'lora_target_modules',
+                [
+                    "q_proj",
+                    "v_proj",
+                    "k_proj",
+                    "o_proj",
+                    "gate_proj",
+                    "up_proj",
+                    "down_proj",
+                ],
+            )
+            lora_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                r=self.config['lora_r'],
+                lora_alpha=self.config['lora_alpha'],
+                lora_dropout=self.config['lora_dropout'],
+                target_modules=target_modules,
+            )
+
+            self.model = get_peft_model(self.model, lora_config)
+            logger.info("🆕 Initialized fresh LoRA adapters")
         
         # Freeze everything first
         for p in self.model.parameters():
@@ -521,6 +697,72 @@ class AdvancedRadiologyTrainer:
         total = sum(p.numel() for p in self.model.parameters())
         logger.info(f"✅ Trainable params (LoRA + projector): {trainable:,} ({trainable/total*100:.2f}%)")
         logger.info(f"✅ Total params: {total:,}")
+        if loaded_existing:
+            logger.info("🔄 Continuing training from existing LoRA weights")
+    
+    def _attach_auxiliary_heads(self):
+        """Attach auxiliary classification heads for CheXpert and ICD supervision."""
+        hidden_size = getattr(self.model.config, "hidden_size", None)
+        if hidden_size is None:
+            embeddings = getattr(self.model, "get_input_embeddings", None)
+            if callable(embeddings):
+                embedding_layer = embeddings()
+                if embedding_layer is not None and hasattr(embedding_layer, "embedding_dim"):
+                    hidden_size = embedding_layer.embedding_dim
+        if hidden_size is None and hasattr(self.model, "model") and hasattr(self.model.model, "model_dim"):
+            hidden_size = self.model.model.model_dim
+        if hidden_size is None:
+            hidden_size = getattr(self.model.config, "hidden_size", 4096)
+        
+        self.model.chexpert_head = nn.Linear(hidden_size, len(CHEXPERT_ORDER), bias=True)
+        self.model.icd_head = nn.Linear(hidden_size, len(ICD_ORDER), bias=True)
+        nn.init.xavier_uniform_(self.model.chexpert_head.weight)
+        nn.init.zeros_(self.model.chexpert_head.bias)
+        nn.init.xavier_uniform_(self.model.icd_head.weight)
+        nn.init.zeros_(self.model.icd_head.bias)
+        self.model.chexpert_head.to(self.device)
+        self.model.icd_head.to(self.device)
+        logger.info("✅ Attached auxiliary classification heads for CheXpert/ICD supervision")
+    
+    def _unfreeze_language_backbone(self):
+        """Optionally unfreeze the projector and the last N transformer blocks."""
+        num_layers = int(self.config.get('unfreeze_language_layers', 0))
+        if num_layers <= 0:
+            logger.info("Skipping language layer unfreeze (num_layers <= 0)")
+            return
+        
+        layer_container = None
+        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
+            layer_container = self.model.model.layers
+        elif hasattr(self.model, "base_model") and hasattr(self.model.base_model, "model") \
+                and hasattr(self.model.base_model.model, "layers"):
+            layer_container = self.model.base_model.model.layers
+        
+        if layer_container is not None:
+            for layer in layer_container[-num_layers:]:
+                for param in layer.parameters():
+                    param.requires_grad_(True)
+            logger.info(f"✅ Unfrozen last {num_layers} transformer blocks")
+        else:
+            logger.warning("⚠️ Unable to locate transformer layers for unfreezing")
+        
+        if self.config.get('unfreeze_projector', True):
+            projector = None
+            if hasattr(self.model, "mm_projector"):
+                projector = self.model.mm_projector
+            elif hasattr(self.model, "base_model") and hasattr(self.model.base_model, "model") \
+                    and hasattr(self.model.base_model.model, "mm_projector"):
+                projector = self.model.base_model.model.mm_projector
+            if projector is not None:
+                for param in projector.parameters():
+                    param.requires_grad_(True)
+                logger.info("✅ mm_projector parameters unfrozen")
+            else:
+                logger.warning("⚠️ Unable to locate mm_projector to unfreeze")
+        
+        trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.model.parameters())
+        logger.info(f"🔁 Updated trainable params after unfreeze: {trainable:,} ({trainable/total*100:.2f}%)")
     
     def setup_curriculum_learning(self, train_samples: List[Dict]):
         """Setup advanced curriculum learning"""
@@ -542,23 +784,14 @@ class AdvancedRadiologyTrainer:
     
     def create_advanced_dataset(self, samples: List[Dict], is_training: bool = True) -> CurriculumDataset:
         """Create dataset with advanced features"""
-        # Save samples to temporary file for dataset loading
-        temp_file = Path("temp_samples.jsonl")
-        with open(temp_file, 'w') as f:
-            for sample in samples:
-                f.write(json.dumps(sample) + '\n')
-        
         dataset = CurriculumDataset(
-            data_path=str(temp_file),
+            samples=samples,
             image_root=".",  # FIXED: Use current directory since paths already include "files/"
             processor=self.processor,
             max_length=self.config.get('max_length', 512),
-            stage="both"
+            stage="both",
+            max_label_tokens=self.config.get('max_label_tokens', 128),
         )
-        
-        # Clean up temp file
-        temp_file.unlink()
-        
         return dataset
     
     def compute_advanced_metrics(self, eval_preds) -> Dict[str, float]:
@@ -701,11 +934,25 @@ class AdvancedRadiologyTrainer:
         with open(self.config['validation_path'], 'r') as f:
             val_samples = [json.loads(line) for line in f]
         
-        # Setup curriculum learning
-        self.setup_curriculum_learning(train_samples)
-        
-        # Create datasets
-        train_dataset = self.create_advanced_dataset(train_samples, is_training=True)
+        stage_mix_dataset: Optional[StageMixDataset] = None
+        if self.config.get('curriculum_learning', True):
+            self.setup_curriculum_learning(train_samples)
+            train_dataset = self.create_advanced_dataset(train_samples, is_training=True)
+        else:
+            self.curriculum_sampler = None
+            stage_a_samples = [sample for sample in train_samples if sample.get('stage') == 'A']
+            stage_b_samples = [sample for sample in train_samples if sample.get('stage') == 'B']
+            stage_mix_dataset = StageMixDataset(
+                stage_a_samples=stage_a_samples,
+                stage_b_samples=stage_b_samples,
+                image_root=".",
+                processor=self.processor,
+                max_length=self.config.get('max_length', 512),
+                max_label_tokens=self.config.get('max_label_tokens', 128),
+                stage_b_fraction=self.config.get('stage_b_fraction', 0.65),
+                seed=self.config.get('seed', 42),
+            )
+            train_dataset = stage_mix_dataset
         val_dataset = self.create_advanced_dataset(val_samples, is_training=False)
         
         # Calculate training steps and stage split
@@ -731,6 +978,9 @@ class AdvancedRadiologyTrainer:
             curriculum_sampler=self.curriculum_sampler,
             stage_split_step=stage_split_step
         )
+
+        if stage_mix_dataset is not None:
+            self.trainer.add_callback(StageMixCallback(stage_mix_dataset, self.config.get('seed', 42)))
         
         # Start training
         logger.info("Starting training with advanced curriculum learning...")

@@ -28,7 +28,43 @@ def list_to_dict(lst):
         return {}
     if isinstance(lst, dict):
         return lst
-    out = {l["code"]: l.get("confidence", 0) for l in lst}
+    code_map = {
+        # Pneumonia variants
+        'J18': 'Pneumonia',
+        'J12': 'Pneumonia',
+        'J13': 'Pneumonia',
+        'J14': 'Pneumonia',
+        'J15': 'Pneumonia',
+        'J16': 'Pneumonia',
+        'J17': 'Pneumonia',
+        # Pleural effusion variants
+        'J94': 'Pleural_Effusion',
+        # Pneumothorax
+        'J93': 'Pneumothorax',
+        # Pulmonary edema
+        'J81': 'Pulmonary_Edema',
+        # Cardiomegaly / hypertensive cardiomegaly proxies
+        'I51.7': 'Cardiomegaly',
+        'I10': 'Cardiomegaly',  # hypertension often co-coded with cardiomegaly in chart
+        # Atelectasis
+        'J98.1': 'Atelectasis',
+        # Pulmonary embolism
+        'I26': 'Pulmonary_Embolism',
+        # Rib fractures
+        'S22': 'Rib_Fracture',
+    }
+    out = {}
+    for item in lst:
+        code = item.get('code')
+        if not code:
+            continue
+        label = None
+        for key, mapped in code_map.items():
+            if code.startswith(key):
+                label = mapped
+                break
+        if label:
+            out[label] = 1
     return out
 
 class SimpleBatchEvaluator:

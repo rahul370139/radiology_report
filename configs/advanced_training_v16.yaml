@@ -1,0 +1,80 @@
+# LLaVA-Med v1.6 LoRA top-up configuration (GPU-friendly / Colab-ready)
+
+# Base model + tokenizer
+base_model: "liuhaotian/llava-v1.6-mistral-7b"
+model_type: "llava_mistral"
+
+# Dataset (paths relative to repo root)
+dataset_path: "src/data/processed/curriculum_train_final_clean.jsonl"
+validation_path: "src/data/processed/curriculum_val_final_clean.jsonl"
+image_root: "."
+
+# Disable curriculum sampler for faster GPU runs
+curriculum_learning: false
+
+# LoRA configuration (≈1% trainable params)
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_checkpoint_path: null
+lora_target_modules:
+  - "mm_projector"
+  - "model.layers.30."
+  - "model.layers.31."
+
+# Vision freezing: keep tower frozen, unfreeze projector & last blocks
+freeze_vision_backbone: true
+freeze_projector: false
+unfreeze_projector: true
+unfreeze_language_layers: 4
+
+# Training schedule (T4 / A10 friendly)
+epochs: 3
+batch_size: 4
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-4
+warmup_ratio: 0.03
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+# Aux losses to boost CheXpert / ICD recall
+aux_loss:
+  chexpert:
+    weight: 4.0
+    pos_weight: 5.0
+    focal_gamma: 1.0
+  icd:
+    weight: 3.0
+    pos_weight: 4.0
+    focal_gamma: 1.0
+
+# Precision / performance (GPU)
+bf16: true
+fp16: false
+use_fp32: false
+matmul_precision: "high"
+
+# Logging / checkpoints
+save_strategy: "steps"
+save_steps: 500
+save_total_limit: 3
+evaluation_strategy: "steps"
+eval_steps: 500
+logging_steps: 25
+logging_dir: "logs"
+report_to: "tensorboard"
+
+# Misc settings
+seed: 42
+dataloader_num_workers: 4
+dataloader_pin_memory: true
+remove_unused_columns: false
+gradient_checkpointing: true
+optim: "adamw_torch"
+stage_b_fraction: 0.65
+max_label_tokens: 128
+output_dir: "runs/v1_6_topup"
+stage_split: 0.0
+checkpoint_dir: "checkpoints"
+checkpoint_a_name: "checkpoint_A"

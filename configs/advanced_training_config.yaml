@@ -6,8 +6,8 @@ base_model: "microsoft/llava-med-v1.5-mistral-7b"
 model_type: "llava_mistral"
 
 # Data Configuration - Using corrected EHR data
-dataset_path: "../../data/processed/curriculum_train_final_clean.jsonl"
-validation_path: "../../data/processed/curriculum_val_final_clean.jsonl"
+dataset_path: "src/data/processed/curriculum_train_final_clean.jsonl"
+validation_path: "src/data/processed/curriculum_val_final_clean.jsonl"
 image_root: "."
 
 # Advanced Curriculum Learning Configuration
@@ -50,6 +50,7 @@ use_lora: true
 lora_r: 8                      # Reduced from 16 for memory efficiency
 lora_alpha: 16                 # Reduced from 32 to match r=8
 lora_dropout: 0.05
+lora_checkpoint_path: "checkpoints/working_topup"  # Existing LoRA adapter to continue fine-tuning (set to null for fresh run)
 lora_target_modules:
   - "q_proj"
   - "v_proj" 
@@ -61,6 +62,21 @@ lora_target_modules:
   # Removed "mm_projector" - Sequential module not supported by LoRA             # Include projector as recommended
 freeze_vision_backbone: true   # Freeze vision backbone for memory efficiency
 freeze_projector: false        # Do not freeze projector as recommended
+
+# Auxiliary supervision (CheXpert + ICD heads)
+aux_loss:
+  chexpert:
+    weight: 0.55            # Relative weight for CheXpert auxiliary BCE/Focal loss
+    pos_weight: 3.0         # Upscale rare positives (helps recall)
+    focal_gamma: 0.0        # Set >0 to enable focal modulation
+  icd:
+    weight: 0.45
+    pos_weight: 2.5
+    focal_gamma: 0.0
+
+# Partial unfreezing for LoRA top-up
+unfreeze_language_layers: 3    # Unfreeze last N transformer blocks
+unfreeze_projector: true       # Always fine-tune projector with auxiliary heads
 
 # Precision & Performance - MPS/CPU Optimized
 bf16: false                    # Not supported on macOS MPS

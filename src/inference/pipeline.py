@@ -12,7 +12,12 @@ from typing import Any, Dict, List, Optional
 
 import torch
 from PIL import Image
-from transformers import LogitsProcessor, LogitsProcessorList
+from transformers import (
+    LogitsProcessor,
+    LogitsProcessorList,
+    MaxLengthCriteria,
+    StoppingCriteriaList,
+)
 
 from llava.constants import (
     DEFAULT_IMAGE_TOKEN,
@@ -258,6 +263,9 @@ class RadiologyInferencePipeline:
             if token_bias:
                 logits_processors = LogitsProcessorList([TokenBiasProcessor(token_bias)])
 
+            total_max_length = input_ids.shape[1] + mx
+            stopping_criteria = StoppingCriteriaList([MaxLengthCriteria(total_max_length)])
+
             with torch.inference_mode():
                 output_ids = self.model.generate(
                     inputs=input_ids,
@@ -269,6 +277,7 @@ class RadiologyInferencePipeline:
                     pad_token_id=self.tokenizer.eos_token_id,
                     use_cache=True,
                     logits_processor=logits_processors,
+                    stopping_criteria=stopping_criteria,
                 )
             return self.tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
 
@@ -469,7 +478,7 @@ class RadiologyInferencePipeline:
                 "raw_output": impression_text,
             }
             if self._str_to_bool(os.getenv("ENABLE_LABEL_KEYWORDS", "true"), True):
-                self._apply_keyword_rules(parsed, stage)
+                self._apply_keyword_rules(parsed, stage, ehr_json)
             if debug_mode:
                 print("[DEBUG] Final multi-pass result:", parsed)
             return parsed
@@ -507,9 +516,9 @@ class RadiologyInferencePipeline:
             )
 
         raw_response = _run_generation(system_prompt, user_prompt)
-        parsed = self.parse_output(raw_response, stage)
+        parsed = self.parse_output(raw_response, stage, ehr_json)
         if self._str_to_bool(os.getenv("ENABLE_LABEL_KEYWORDS", "true"), True):
-            self._apply_keyword_rules(parsed, stage)
+            self._apply_keyword_rules(parsed, stage, ehr_json)
         return parsed
 
     # ------------------------------------------------------------------ #
@@ -531,7 +540,7 @@ class RadiologyInferencePipeline:
                     return text[start:idx + 1]
         return None
 
-    def parse_output(self, text: str, stage: str) -> Dict[str, Any]:
+    def parse_output(self, text: str, stage: str, ehr_json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         result = {
             "impression": "",
             "chexpert": {label: 0 for label in CHEXPERT},
@@ -565,10 +574,10 @@ class RadiologyInferencePipeline:
 
         result["raw_output"] = text.strip()
         if self._str_to_bool(os.getenv("ENABLE_LABEL_KEYWORDS", "true"), True):
-            self._apply_keyword_rules(result, stage)
+            self._apply_keyword_rules(result, stage, ehr_json)
         return result
 
-    def _apply_keyword_rules(self, parsed: Dict[str, Any], stage: str) -> None:
+    def _apply_keyword_rules(self, parsed: Dict[str, Any], stage: str, ehr_json: Optional[Dict[str, Any]]) -> None:
         impression = (parsed.get("impression") or "").lower()
         if not impression:
             return
@@ -581,8 +590,6 @@ class RadiologyInferencePipeline:
             ("tension pneumothorax", "Pneumothorax"),
             ("effusion", "Pleural Effusion"),
             ("pleural effusions", "Pleural Effusion"),
-            ("infiltrate", "Lung Opacity"),
-            ("infiltrates", "Lung Opacity"),
             ("opacity", "Lung Opacity"),
             ("opacities", "Lung Opacity"),
             ("edema", "Edema"),
@@ -601,14 +608,9 @@ class RadiologyInferencePipeline:
             if keyword in impression:
                 chexpert[label] = 1
 
-        positive_labels = [label for label, value in chexpert.items() if label != "No Finding" and value != 0]
-        chexpert["No Finding"] = 0 if positive_labels else 1
-
         if stage == "B":
             icd_keywords = [
                 ("pneumonia", "Pneumonia"),
-                ("infiltrate", "Pneumonia"),
-                ("infiltrates", "Pneumonia"),
                 ("effusion", "Pleural_Effusion"),
                 ("pulmonary edema", "Pulmonary_Edema"),
                 ("cardiomegaly", "Cardiomegaly"),
@@ -620,6 +622,36 @@ class RadiologyInferencePipeline:
             for keyword, label in icd_keywords:
                 if keyword in impression:
                     icd[label] = 1
+
+        if stage == "B" and ehr_json:
+            labs = ehr_json.get("Labs", {})
+            bnp_info = labs.get("BNP") or labs.get("bnp")
+            try:
+                bnp_value = float(bnp_info.get("value")) if bnp_info and "value" in bnp_info else None
+            except (TypeError, ValueError):
+                bnp_value = None
+            bnp_threshold = float(os.getenv("BNP_EDEMA_THRESHOLD", "1200"))
+            admission_type = (ehr_json.get("admission_type") or "").lower()
+            if bnp_value and bnp_value >= bnp_threshold and ("elective" in admission_type):
+                chexpert["Edema"] = 1
+                chexpert["Pleural Effusion"] = 1
+                icd["Pulmonary_Edema"] = 1
+                icd["Pleural_Effusion"] = 1
+            crp_info = labs.get("CRP") or labs.get("crp")
+            try:
+                crp_value = float(crp_info.get("value")) if crp_info and "value" in crp_info else None
+            except (TypeError, ValueError):
+                crp_value = None
+            crp_threshold = float(os.getenv("CRP_PNEUMONIA_THRESHOLD", "150"))
+            if crp_value and crp_value >= crp_threshold and "pneumonia" in impression:
+                icd["Pneumonia"] = 1
+            o2_info = ehr_json.get("O2_device") or {}
+            device_name = (o2_info.get("device") or "").lower()
+            if device_name and device_name not in ("unknown", "room air", "none"):
+                chexpert["Support Devices"] = 1
+
+        positive_labels = [label for label, value in chexpert.items() if label != "No Finding" and value != 0]
+        chexpert["No Finding"] = 0 if positive_labels else 1
 
     # ------------------------------------------------------------------ #
     # Convenience wrappers
@@ -655,4 +687,3 @@ if __name__ == "__main__":
     }
     result_b = generate("src/data/sample_images/sample_xray_1.jpg", sample_ehr)
     print("Stage B Result:", json.dumps(result_b, indent=2))
-

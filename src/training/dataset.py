@@ -5,18 +5,110 @@ Dataset class for MIMIC-CXR curriculum training.
 Handles loading images, prompts, and targets for both Stage A and Stage B training.
 """
 
+import copy
 import json
-import torch
-from torch.utils.data import Dataset, WeightedRandomSampler
-from PIL import Image
-from pathlib import Path
-from typing import Dict, List, Optional, Any
 import logging
-import numpy as np
+import random
 from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+from PIL import Image
+from torch.utils.data import Dataset, WeightedRandomSampler
 
 logger = logging.getLogger(__name__)
 
+CHEXPERT_ORDER = [
+    "Consolidation",
+    "Edema",
+    "Enlarged Cardiomediastinum",
+    "Fracture",
+    "Lung Lesion",
+    "Lung Opacity",
+    "No Finding",
+    "Pleural Effusion",
+    "Pleural Other",
+    "Pneumonia",
+    "Pneumothorax",
+    "Support Devices",
+]
+
+ICD_ORDER = [
+    "Pneumonia",
+    "Pleural_Effusion",
+    "Pneumothorax",
+    "Pulmonary_Edema",
+    "Cardiomegaly",
+    "Atelectasis",
+    "Pulmonary_Embolism",
+    "Rib_Fracture",
+]
+
+ICD_CODE_MAP = {
+    "J18": "Pneumonia",
+    "J12": "Pneumonia",
+    "J13": "Pneumonia",
+    "J14": "Pneumonia",
+    "J15": "Pneumonia",
+    "J16": "Pneumonia",
+    "J17": "Pneumonia",
+    "J94": "Pleural_Effusion",
+    "J93": "Pneumothorax",
+    "J81": "Pulmonary_Edema",
+    "I51.7": "Cardiomegaly",
+    "I10": "Cardiomegaly",
+    "J98.1": "Atelectasis",
+    "I26": "Pulmonary_Embolism",
+    "S22": "Rib_Fracture",
+}
+
+def _is_low_ehr(sample: Dict[str, Any]) -> bool:
+    patient = sample.get('patient_data') or {}
+    vitals = patient.get('Vitals') or {}
+    labs = patient.get('Labs') or {}
+    return len(vitals) <= 2 and len(labs) <= 2
+
+def convert_stage_b_to_stage_a(sample: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a Stage-A style sample from Stage-B by stripping EHR context."""
+    clone = copy.deepcopy(sample)
+    clone['stage'] = 'A'
+    patient = clone.get('patient_data') or {}
+    minimal = {}
+    if 'Age' in patient:
+        minimal['Age'] = patient['Age']
+    if 'Sex' in patient:
+        minimal['Sex'] = patient['Sex']
+    clone['patient_data'] = minimal if minimal else None
+    return clone
+
+def build_stage_mix_samples(
+    stage_a_samples: List[Dict[str, Any]],
+    stage_b_samples: List[Dict[str, Any]],
+    seed: int,
+    stage_b_fraction: float = 0.65,
+) -> List[Dict[str, Any]]:
+    """Construct a mixed Stage-A/Stage-B epoch sample list."""
+    rng = random.Random(seed)
+    stage_a_block = [copy.deepcopy(s) for s in stage_a_samples]
+
+    low_ehr_candidates = [s for s in stage_b_samples if _is_low_ehr(s)]
+    synthetic_source = low_ehr_candidates if len(low_ehr_candidates) >= len(stage_a_samples) else stage_b_samples
+    synthetic_count = min(len(synthetic_source), len(stage_a_samples))
+    synthetic_stage_a = [
+        convert_stage_b_to_stage_a(copy.deepcopy(s))
+        for s in rng.sample(synthetic_source, synthetic_count)
+    ]
+
+    stage_b_count = max(1, int(len(stage_b_samples) * stage_b_fraction))
+    sampled_stage_b = [
+        copy.deepcopy(s) for s in rng.sample(stage_b_samples, stage_b_count)
+    ]
+
+    combined = stage_a_block + synthetic_stage_a + sampled_stage_b
+    rng.shuffle(combined)
+    return combined
 
 class CurriculumDataset(Dataset):
     """
@@ -27,11 +119,13 @@ class CurriculumDataset(Dataset):
     
     def __init__(
         self,
-        data_path: str,
+        data_path: Optional[str] = None,
+        samples: Optional[List[Dict[str, Any]]] = None,
         image_root: str = ".",
         processor: Optional[Any] = None,
         max_length: int = 512,
         stage: str = "both",  # "stage_a", "stage_b", or "both"
+        max_label_tokens: int = 128,
     ):
         """
         Initialize curriculum dataset.
@@ -43,15 +137,27 @@ class CurriculumDataset(Dataset):
             max_length: Maximum sequence length
             stage: Which stage to load ("stage_a", "stage_b", or "both")
         """
+        if data_path is None and samples is None:
+            raise ValueError("Either data_path or samples must be provided to CurriculumDataset")
         self.image_root = Path(image_root)
         self.processor = processor
         self.max_length = max_length
         self.stage = stage
+        self.max_label_tokens = max_label_tokens
         
         # Load curriculum data
-        self.samples = self._load_curriculum(data_path)
+        if samples is not None:
+            self.samples = [
+                sample for sample in samples
+                if self.stage == "both"
+                or (self.stage == "stage_a" and sample.get('stage') == 'A')
+                or (self.stage == "stage_b" and sample.get('stage') == 'B')
+            ]
+        else:
+            self.samples = self._load_curriculum(data_path)
         
-        logger.info(f"Loaded {len(self.samples)} samples from {data_path}")
+        logger.info(f"Loaded {len(self.samples)} samples"
+                    f"{'' if data_path is None else f' from {data_path}'}")
         logger.info(f"Stage filter: {stage}")
         
         # Count samples by mode
@@ -127,6 +233,9 @@ TASK:
             
             # Format target with CheXpert labels
             chexpert_labels = sample.get('chexpert_labels', {})
+            chexpert_vec, chexpert_mask = self._build_chexpert_vector(chexpert_labels)
+            icd_vec = [0.0 for _ in ICD_ORDER]
+            icd_mask = [0.0 for _ in ICD_ORDER]
             target = self._format_stage_a_target(sample['impression'], chexpert_labels)
             mode = "image_only"
         else:
@@ -147,7 +256,9 @@ TASK:
             
             # Format target with CheXpert and ICD labels
             chexpert_labels = sample.get('chexpert_labels', {})
-            icd_labels = sample.get('icd_labels', {})
+            icd_labels = self._normalize_icd_labels(sample.get('icd_labels'))
+            chexpert_vec, chexpert_mask = self._build_chexpert_vector(chexpert_labels)
+            icd_vec, icd_mask = self._build_icd_vector(icd_labels)
             target = self._format_stage_b_target(sample['impression'], chexpert_labels, icd_labels)
             mode = "image_ehr"
         
@@ -167,7 +278,56 @@ TASK:
             'stage': sample['stage'],
             'study_id': study_id,
             'image_path': str(image_path),
+            'chexpert_target': chexpert_vec,
+            'chexpert_mask': chexpert_mask,
+            'icd_target': icd_vec,
+            'icd_mask': icd_mask,
         }
+
+    def _build_chexpert_vector(self, chexpert_labels: Dict[str, int]) -> Tuple[List[float], List[float]]:
+        """Build dense target vector and supervision mask for CheXpert labels."""
+        values: List[float] = []
+        mask: List[float] = []
+        for label in CHEXPERT_ORDER:
+            raw = chexpert_labels.get(label, 0)
+            if raw == -1:
+                values.append(0.0)
+                mask.append(0.0)
+            else:
+                values.append(1.0 if raw in (1, True) else 0.0)
+                mask.append(1.0)
+        return values, mask
+
+    def _normalize_icd_labels(self, icd_labels: Any) -> Dict[str, int]:
+        """Normalize ICD annotations into a dict keyed by ICD_ORDER with 0/1 values."""
+        normalized = {label: 0 for label in ICD_ORDER}
+        if not icd_labels:
+            return normalized
+        if isinstance(icd_labels, dict):
+            for label in ICD_ORDER:
+                value = icd_labels.get(label, 0)
+                normalized[label] = 1 if value in (1, True) else 0
+            return normalized
+        if isinstance(icd_labels, list):
+            for item in icd_labels:
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get('code', '')).upper()
+                for prefix, mapped_label in ICD_CODE_MAP.items():
+                    if code.startswith(prefix):
+                        normalized[mapped_label] = 1
+                        break
+        return normalized
+
+    def _build_icd_vector(self, icd_labels: Dict[str, int]) -> Tuple[List[float], List[float]]:
+        """Build dense target vector and supervision mask for ICD indicators."""
+        values: List[float] = []
+        mask: List[float] = []
+        for label in ICD_ORDER:
+            raw = icd_labels.get(label, 0)
+            values.append(1.0 if raw in (1, True) else 0.0)
+            mask.append(1.0)
+        return values, mask
     
     def _format_ehr_data(self, patient_data: Dict[str, Any]) -> str:
         """Format patient data into compact EHR JSON"""
@@ -237,15 +397,8 @@ TASK:
     
     def _format_stage_a_target(self, impression: str, chexpert_labels: Dict[str, int]) -> str:
         """Format Stage A target response"""
-        # CheXpert labels in consistent order
-        chexpert_order = [
-            "Consolidation", "Edema", "Enlarged Cardiomediastinum", "Fracture",
-            "Lung Lesion", "Lung Opacity", "No Finding", "Pleural Effusion",
-            "Pleural Other", "Pneumonia", "Pneumothorax", "Support Devices"
-        ]
-        
         chexpert_json = {}
-        for label in chexpert_order:
+        for label in CHEXPERT_ORDER:
             chexpert_json[label] = chexpert_labels.get(label, 0)
         
         return f"""1) IMPRESSION: {impression}
@@ -255,25 +408,12 @@ TASK:
     def _format_stage_b_target(self, impression: str, chexpert_labels: Dict[str, int], 
                               icd_labels: Dict[str, int]) -> str:
         """Format Stage B target response"""
-        # CheXpert labels in consistent order
-        chexpert_order = [
-            "Consolidation", "Edema", "Enlarged Cardiomediastinum", "Fracture",
-            "Lung Lesion", "Lung Opacity", "No Finding", "Pleural Effusion",
-            "Pleural Other", "Pneumonia", "Pneumothorax", "Support Devices"
-        ]
-        
-        # ICD labels in consistent order
-        icd_order = [
-            "Pneumonia", "Pleural_Effusion", "Pneumothorax", "Pulmonary_Edema",
-            "Cardiomegaly", "Atelectasis", "Pulmonary_Embolism", "Rib_Fracture"
-        ]
-        
         chexpert_json = {}
-        for label in chexpert_order:
+        for label in CHEXPERT_ORDER:
             chexpert_json[label] = chexpert_labels.get(label, 0)
         
         icd_json = {}
-        for label in icd_order:
+        for label in ICD_ORDER:
             icd_json[label] = icd_labels.get(label, 0)
         
         return f"""1) IMPRESSION: {impression}
@@ -330,6 +470,10 @@ TASK:
         images = [item['image'] for item in batch]  # PIL Images from __getitem__
         prompts = [item['prompt'] for item in batch]
         targets = [item['target'] for item in batch]
+        chexpert_targets = [torch.tensor(item['chexpert_target'], dtype=torch.float32) for item in batch]
+        chexpert_masks = [torch.tensor(item['chexpert_mask'], dtype=torch.float32) for item in batch]
+        icd_targets = [torch.tensor(item['icd_target'], dtype=torch.float32) for item in batch]
+        icd_masks = [torch.tensor(item['icd_mask'], dtype=torch.float32) for item in batch]
         
         # Process with HuggingFace processor if available
         if self.processor is not None:
@@ -406,10 +550,72 @@ TASK:
                 'targets': targets,
             }
         
+        max_tok = getattr(self, "max_label_tokens", None)
+        if max_tok and 'input_ids' in processed and processed['input_ids'].size(1) > max_tok:
+            processed['input_ids'] = processed['input_ids'][:, :max_tok]
+            if 'attention_mask' in processed:
+                processed['attention_mask'] = processed['attention_mask'][:, :max_tok]
+            if 'position_ids' in processed:
+                processed['position_ids'] = processed['position_ids'][:, :max_tok]
+            if 'labels' in processed:
+                processed['labels'] = processed['labels'][:, :max_tok]
+        elif max_tok and 'labels' in processed and processed['labels'].size(1) > max_tok:
+            processed['labels'] = processed['labels'][:, :max_tok]
+
+        processed['chexpert_targets'] = torch.stack(chexpert_targets)
+        processed['chexpert_masks'] = torch.stack(chexpert_masks)
+        processed['icd_targets'] = torch.stack(icd_targets)
+        processed['icd_masks'] = torch.stack(icd_masks)
+        
         # Note: mode, stage, study_id are metadata fields that should not be passed to the model
         # They can be extracted from the batch items if needed for logging/curriculum control
         
         return processed
+
+
+class StageMixDataset(CurriculumDataset):
+    """Dataset that rebuilds Stage-A/B mixture each epoch without full curriculum sampler."""
+
+    def __init__(
+        self,
+        stage_a_samples: List[Dict[str, Any]],
+        stage_b_samples: List[Dict[str, Any]],
+        image_root: str = ".",
+        processor: Optional[Any] = None,
+        max_length: int = 512,
+        max_label_tokens: int = 128,
+        stage_b_fraction: float = 0.65,
+        seed: int = 42,
+    ):
+        self.stage_b_fraction = stage_b_fraction
+        self.seed = seed
+        self.stage_a_base = [copy.deepcopy(s) for s in stage_a_samples]
+        self.stage_b_base = [copy.deepcopy(s) for s in stage_b_samples]
+        initial_samples = build_stage_mix_samples(
+            self.stage_a_base,
+            self.stage_b_base,
+            seed=self.seed,
+            stage_b_fraction=self.stage_b_fraction,
+        )
+        super().__init__(
+            samples=initial_samples,
+            image_root=image_root,
+            processor=processor,
+            max_length=max_length,
+            stage="both",
+            max_label_tokens=max_label_tokens,
+        )
+
+    def rebuild(self, seed: Optional[int] = None) -> None:
+        if seed is not None:
+            self.seed = seed
+        self.samples = build_stage_mix_samples(
+            self.stage_a_base,
+            self.stage_b_base,
+            seed=self.seed,
+            stage_b_fraction=self.stage_b_fraction,
+        )
+        self._log_statistics()
 
 
 class StageAwareDataset(CurriculumDataset):
@@ -561,4 +767,3 @@ if __name__ == "__main__":
     print(f"  Image size: {sample['image'].size}")
     print(f"  Prompt: {sample['prompt'][:100]}...")
     print(f"  Target: {sample['target'][:100]}...")
-
