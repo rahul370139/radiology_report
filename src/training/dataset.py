@@ -464,33 +464,50 @@ TASK:
     def collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Collate function that builds multimodal prompts for HF LLaVA processors."""
         images = [item['image'] for item in batch]
+        targets = [item['target'] for item in batch]
         chexpert_targets = [torch.tensor(item['chexpert_target'], dtype=torch.float32) for item in batch]
         chexpert_masks = [torch.tensor(item['chexpert_mask'], dtype=torch.float32) for item in batch]
         icd_targets = [torch.tensor(item['icd_target'], dtype=torch.float32) for item in batch]
         icd_masks = [torch.tensor(item['icd_mask'], dtype=torch.float32) for item in batch]
 
         if self.processor is not None:
-            messages_batch: List[List[Dict[str, Any]]] = []
+            chat_texts: List[str] = []
             for item in batch:
                 user_entries: List[Dict[str, Any]] = []
                 if item['mode'] == 'image_ehr' and item.get('ehr_context'):
                     user_entries.append({"type": "text", "text": item['ehr_context'] + "\n"})
                 user_entries.append({"type": "image"})
                 user_entries.append({"type": "text", "text": "Provide:\nImpression:\nCheXpert:\nICD:"})
-                messages_batch.append([
+                messages = [
                     {"role": "user", "content": user_entries},
-                    {"role": "assistant", "content": [{"type": "text", "text": item['target']}]}])
+                    {"role": "assistant", "content": [{"type": "text", "text": item['target']}]} ,
+                ]
+                chat_texts.append(
+                    self.processor.apply_chat_template(
+                        messages,
+                        add_generation_prompt=False,
+                        tokenize=False,
+                    )
+                )
 
             processed = self.processor(
-                messages=messages_batch,
+                text=chat_texts,
                 images=images,
                 padding=True,
                 return_tensors="pt",
             )
 
-            if 'input_ids' in processed:
-                labels = torch.full_like(processed['input_ids'], -100)
-                processed['labels'] = labels
+            labels = torch.full_like(processed['input_ids'], -100)
+            for i, chat_text in enumerate(chat_texts):
+                assistant_start = chat_text.find("assistant")
+                if assistant_start != -1:
+                    tokens = self.processor.tokenizer.encode(chat_text, add_special_tokens=False)
+                    assistant_tokens = self.processor.tokenizer.encode("assistant", add_special_tokens=False)
+                    for j in range(len(tokens) - len(assistant_tokens) + 1):
+                        if tokens[j:j+len(assistant_tokens)] == assistant_tokens:
+                            labels[i, j+len(assistant_tokens):] = processed['input_ids'][i, j+len(assistant_tokens):]
+                            break
+            processed['labels'] = labels
             if 'pixel_values' in processed and 'images' not in processed:
                 processed['images'] = processed['pixel_values']
         else:
