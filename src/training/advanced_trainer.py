@@ -403,14 +403,21 @@ class AdvancedRadiologyTrainer:
         
         # dtype selection: float16 on CUDA, fp32 otherwise
         dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        load_in_8bit = bool(self.config.get('load_in_8bit', False)) and torch.cuda.is_available()
+        device_map = "auto" if torch.cuda.is_available() else None
         
         try:
             # Try LLaVA-Med specific model loading
             from llava.model.language_model.llava_mistral import LlavaMistralForCausalLM
-            self.model = LlavaMistralForCausalLM.from_pretrained(base_id, torch_dtype=dtype, device_map=None, trust_remote_code=True)
+            self.model = LlavaMistralForCausalLM.from_pretrained(
+                base_id,
+                torch_dtype=dtype,
+                device_map=None,
+                trust_remote_code=True,
+            )
             
             # AGGRESSIVE MPS optimization
-            print("   Applying aggressive MPS optimizations...")
+            print("   Applying device optimizations...")
             self.model = self.model.to(self.device)
             if dtype == torch.float16 and self.device.type == 'cuda':
                 self.model.half()
@@ -430,18 +437,22 @@ class AdvancedRadiologyTrainer:
         except ImportError:
             logger.warning("LLaVA-Med specific import failed, trying standard transformers...")
             if is_hf_llava:
-                # HF LLaVA uses vision2seq class
+                # HF LLaVA (vision-to-seq) path; let Accelerate dispatch handle placement
                 self.model = AutoModelForVision2Seq.from_pretrained(
                     base_id,
                     torch_dtype=dtype,
-                    device_map="auto",
+                    device_map=device_map,
+                    load_in_8bit=load_in_8bit,
+                    low_cpu_mem_usage=True,
                     trust_remote_code=True,
                 )
             else:
                 self.model = AutoModelForCausalLM.from_pretrained(
                     base_id,
                     torch_dtype=dtype,
-                    device_map="auto",
+                    device_map=device_map,
+                    load_in_8bit=load_in_8bit,
+                    low_cpu_mem_usage=True,
                     trust_remote_code=True,
                 )
             
@@ -457,67 +468,23 @@ class AdvancedRadiologyTrainer:
             
             logger.info(f"✅ Model loaded with MPS optimization (dtype: {dtype})")
         
-        # Configure model for MPS training
+        # Configure model
         self.model.config.use_cache = False
         try:
             torch.set_float32_matmul_precision("high")
         except Exception:
             pass
-        
-        # Additional MPS optimizations
-        if hasattr(torch.mps, 'empty_cache'):
-            torch.mps.empty_cache()
-        
+
         print(f"   🎯 Model ready on {self.device}")
-        
-        # Force float32 everywhere for MPS compatibility
-        self.model.float()
-        for p in self.model.parameters():
-            p.data = p.data.float()
-        
-        # CRITICAL: Ensure ALL model components are on MPS
-        self.model = self.model.to(self.device)
-        for name, param in self.model.named_parameters():
-            if param.device != self.device:
-                param.data = param.data.to(self.device)
-        for name, buffer in self.model.named_buffers():
-            if buffer.device != self.device:
-                buffer.data = buffer.data.to(self.device)
-        
-        # CRITICAL: Force mm_projector to MPS device - AGGRESSIVE APPROACH
-        try:
-            # Method 1: Direct access
-            if hasattr(self.model, 'get_model'):
-                base_model = self.model.get_model()
-                if hasattr(base_model, 'mm_projector'):
-                    base_model.mm_projector = base_model.mm_projector.to(self.device)
-                    for param in base_model.mm_projector.parameters():
-                        param.data = param.data.to(self.device)
-                    for buffer in base_model.mm_projector.buffers():
-                        buffer.data = buffer.data.to(self.device)
-            
-            # Method 2: Through base_model attribute
-            if hasattr(self.model, 'base_model'):
-                if hasattr(self.model.base_model, 'model') and hasattr(self.model.base_model.model, 'mm_projector'):
-                    self.model.base_model.model.mm_projector = self.model.base_model.model.mm_projector.to(self.device)
-                    for param in self.model.base_model.model.mm_projector.parameters():
-                        param.data = param.data.to(self.device)
-                    for buffer in self.model.base_model.model.mm_projector.buffers():
-                        buffer.data = buffer.data.to(self.device)
-            
-            # Method 3: Recursive search and move
-            def move_to_device(module, device):
-                module.to(device)
-                for child in module.children():
-                    move_to_device(child, device)
-            
-            if hasattr(self.model, 'get_model'):
-                move_to_device(self.model.get_model(), self.device)
-                
-        except Exception as e:
-            print(f"⚠️ MPS device move warning: {e}")
-            # Force fallback to CPU if MPS fails
-            self.device = torch.device('cpu')
+
+        # If Accelerate attached device_map hooks, do not move the model manually
+        hf_device_map = getattr(self.model, 'hf_device_map', None)
+        if not hf_device_map:
+            # For non-accelerate paths, enforce dtype/device
+            if dtype == torch.float16 and self.device.type == 'cuda':
+                self.model.half()
+            else:
+                self.model.float()
             self.model = self.model.to(self.device)
         
         # Disable torch.compile for MPS stability
@@ -995,6 +962,17 @@ class AdvancedRadiologyTrainer:
         
         # Save final model
         self.trainer.save_model()
+        # Optionally merge and save a fully merged checkpoint for inference
+        try:
+            from peft import PeftModel
+            final_merged = self.config.get('final_merged_dir', None)
+            if final_merged and isinstance(self.model, PeftModel):
+                logger.info(f"Merging LoRA adapters and saving to {final_merged}")
+                merged = self.model.merge_and_unload()
+                merged.save_pretrained(final_merged)
+                self.tokenizer.save_pretrained(final_merged)
+        except Exception as e:
+            logger.warning(f"Skipping merged save due to: {e}")
         logger.info("=" * 70)
         logger.info("✅ TRAINING COMPLETED SUCCESSFULLY!")
         logger.info("=" * 70)

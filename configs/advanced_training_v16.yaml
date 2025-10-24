@@ -53,6 +53,8 @@ bf16: true
 fp16: false
 use_fp32: false
 matmul_precision: "high"
+load_in_8bit: true
+final_merged_dir: "checkpoints/merged/main_merged_v16"
 
 # Logging / checkpoints
 save_strategy: "steps"
