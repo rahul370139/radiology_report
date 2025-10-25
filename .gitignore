@@ -48,3 +48,5 @@ Thumbs.db
 # Embedded repositories
 FastChat/
 LLaVA-Med/
+radiology_checkpoints/
+subset_images/
