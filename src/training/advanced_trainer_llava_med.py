@@ -357,6 +357,16 @@ class AdvancedRadiologyTrainer:
         
         # Load config first to decide correct model class
         from transformers import AutoConfig, AutoModelForVision2Seq
+        
+        # Try to import LLaVA modules first to register the model type
+        try:
+            import llava
+            from llava.model.language_model.llava_mistral import LlavaMistralForCausalLM
+            from llava import LlavaProcessor
+            logger.info("✅ LLaVA modules imported successfully")
+        except ImportError:
+            logger.warning("⚠️ LLaVA modules not found, using HuggingFace fallback")
+        
         cfg = AutoConfig.from_pretrained(base_id, trust_remote_code=True)
         model_type = str(getattr(cfg, 'model_type', '')).lower()
         architectures = [a.lower() for a in (getattr(cfg, 'architectures', []) or [])]
@@ -364,14 +374,16 @@ class AdvancedRadiologyTrainer:
         
         # Use LLaVA processor for LLaVA-Med v1.5
         try:
-            from llava.model.language_model.llava_mistral import LlavaMistralForCausalLM
             from llava import LlavaProcessor
             self.processor = LlavaProcessor.from_pretrained(base_id, trust_remote_code=True)
             logger.info("✅ LLaVA processor loaded for LLaVA-Med v1.5")
-        except ImportError:
-            # Fallback to AutoProcessor
-            self.processor = AutoProcessor.from_pretrained(base_id, trust_remote_code=True)
-            logger.info("✅ AutoProcessor loaded as fallback")
+        except (ImportError, ValueError) as e:
+            logger.error(f"❌ LLaVA processor loading failed: {e}")
+            logger.error("Please install LLaVA first: pip install git+https://github.com/haotian-liu/LLaVA.git")
+            raise RuntimeError(
+                "LLaVA-Med v1.5 requires the LLaVA codebase. "
+                "Please run: pip install git+https://github.com/haotian-liu/LLaVA.git"
+            )
             vision_cfg = getattr(cfg, "vision_config", None)
             if hasattr(self.processor, "tokenizer"):
                 self.processor.tokenizer.padding_side = "right"
@@ -425,18 +437,13 @@ class AdvancedRadiologyTrainer:
             )
             logger.info("✅ LLaVA-Med v1.5 model loaded with LlavaMistralForCausalLM")
             
-        except ImportError as e:
-            logger.warning(f"LLaVA imports failed: {e}, trying HuggingFace fallback...")
-            # Fallback to HuggingFace AutoModelForCausalLM
-            self.model = AutoModelForCausalLM.from_pretrained(
-                base_id,
-                torch_dtype=dtype,
-                device_map=device_map,
-                quantization_config=quantization_config,
-                low_cpu_mem_usage=True,
-                trust_remote_code=True,
+        except (ImportError, ValueError) as e:
+            logger.error(f"❌ LLaVA model loading failed: {e}")
+            logger.error("Please install LLaVA first: pip install git+https://github.com/haotian-liu/LLaVA.git")
+            raise RuntimeError(
+                "LLaVA-Med v1.5 requires the LLaVA codebase. "
+                "Please run: pip install git+https://github.com/haotian-liu/LLaVA.git"
             )
-            logger.info("✅ LLaVA-Med v1.5 model loaded with AutoModelForCausalLM fallback")
             logger.info(
                 "✅ Model loaded (dtype=%s, device_map=%s, quant=%s)",
                 dtype,
