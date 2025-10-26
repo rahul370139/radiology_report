@@ -9,8 +9,22 @@ from typing import Optional, Tuple
 
 import torch
 from transformers import AutoTokenizer
-from llava.model import LlavaMistralForCausalLM
 from peft import PeftModel
+
+# Try LLaVA-Med specific import, fallback to standard transformers
+try:
+    from llava.model.language_model.llava_mistral import LlavaMistralForCausalLM
+except ImportError:
+    from transformers import AutoModelForVision2Seq as LlavaMistralForCausalLM
+
+# Try LLaVA constants import, fallback to minimal defs
+try:
+    from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+except ImportError:
+    # fallback minimal defs – work for token addition only
+    DEFAULT_IMAGE_PATCH_TOKEN = "<image_patch>"
+    DEFAULT_IM_START_TOKEN    = "<im_start>"
+    DEFAULT_IM_END_TOKEN      = "<im_end>"
 
 DEFAULT_MODEL_ID = "microsoft/llava-med-v1.5-mistral-7b"
 

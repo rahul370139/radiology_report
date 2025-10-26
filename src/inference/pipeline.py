@@ -19,12 +19,31 @@ from transformers import (
     StoppingCriteriaList,
 )
 
-from llava.constants import (
-    DEFAULT_IMAGE_TOKEN,
-    IMAGE_TOKEN_INDEX,
-)
-from llava.conversation import conv_templates
-from llava.mm_utils import process_images, tokenizer_image_token
+# ------------------------------------------------------------------
+# LLaVA helper symbols – use package if present, otherwise local shim
+try:
+    from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
+    from llava.conversation import conv_templates
+    from llava.mm_utils import process_images, tokenizer_image_token
+except ImportError:
+    DEFAULT_IMAGE_TOKEN = "<image>"
+    IMAGE_TOKEN_INDEX   = -200  # any unused id; only placeholder
+    # minimal conversation template (only the one we use)
+    class _Conv:  # noqa: D401
+        roles = ("USER", "ASSISTANT")
+        system = ""
+        messages = []
+        def copy(self):           return _Conv()
+        def append_message(self, role, msg): self.messages.append((role, msg))
+        def get_prompt(self):     return "\n".join(
+            f"{r}: {m}" for r, m in self.messages if m is not None
+        )
+    conv_templates = {"llava_v1": _Conv()}
+    # very light replacements
+    def process_images(imgs, proc, cfg): return proc(imgs[0]).unsqueeze(0)  # ≈ (1, 3, H, W)
+    def tokenizer_image_token(text, tok, token_id, return_tensors="pt"):
+        return tok(text, return_tensors=return_tensors).input_ids
+# ------------------------------------------------------------------
 
 # Import our model loader
 import sys
