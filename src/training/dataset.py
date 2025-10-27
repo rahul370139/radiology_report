@@ -65,13 +65,46 @@ ICD_CODE_MAP = {
 }
 
 def _is_low_ehr(sample: Dict[str, Any]) -> bool:
+    """
+    Check if sample has low EHR data coverage.
+    
+    WHY THIS EXISTS:
+    - Some Stage B samples have minimal EHR data (few vitals, few labs)
+    - These can be converted to Stage A if needed for curriculum mixing
+    - Low EHR = <=2 vitals AND <=2 labs
+    
+    RETURNS:
+        True if sample has low EHR coverage, False otherwise
+    """
     patient = sample.get('patient_data') or {}
     vitals = patient.get('Vitals') or {}
     labs = patient.get('Labs') or {}
     return len(vitals) <= 2 and len(labs) <= 2
 
 def convert_stage_b_to_stage_a(sample: Dict[str, Any]) -> Dict[str, Any]:
-    """Create a Stage-A style sample from Stage-B by stripping EHR context."""
+    """
+    ⭐ Convert Stage B sample to Stage A format by stripping EHR context
+    
+    WHY THIS IS USED:
+    - Curriculum mixing needs Stage A samples but we have limited Stage A data
+    - Can create "synthetic" Stage A from low-EHR Stage B samples
+    - This expands Stage A training data without needing more image-only samples
+    - Allows Stage B → Stage A progressive curriculum
+    
+    HOW IT WORKS:
+    1. Deep copy the Stage B sample
+    2. Set stage='A'
+    3. Strip all EHR context (Vitals, Labs, etc.) except Age and Sex
+    4. Remove EHR context string
+    5. Keep impression, CheXpert (but no ICD labels)
+    
+    OUTPUT:
+        Stage A-formatted sample with minimal demographics only
+    
+    USE CASE:
+        - Building synthetic Stage A samples for curriculum mixing
+        - Progressive training: B → A (reverse curriculum)
+    """
     clone = copy.deepcopy(sample)
     clone['stage'] = 'A'
     patient = clone.get('patient_data') or {}
@@ -90,7 +123,43 @@ def build_stage_mix_samples(
     seed: int,
     stage_b_fraction: float = 0.65,
 ) -> List[Dict[str, Any]]:
-    """Construct a mixed Stage-A/Stage-B epoch sample list."""
+    """
+    ⭐ Build mixed Stage A/B training samples for each epoch
+    
+    WHY THIS IS USED:
+    - Curriculum learning needs Stage A and Stage B mixed together
+    - Stage A (image-only) is easier → builds foundation
+    - Stage B (image+EHR) is harder → adds clinical reasoning
+    - Mixing prevents catastrophic forgetting
+    
+    HOW IT WORKS:
+    1. Keep all Stage A samples (they're already image-only)
+    2. Convert low-EHR Stage B samples to "synthetic" Stage A
+    3. Sample fraction of Stage B samples (default 65%)
+    4. Shuffle together: Stage A + synthetic Stage A + Stage B
+    
+    STAGE B FRACTION:
+    - 0.65 means 65% Stage B samples in mixed batch
+    - Higher fraction → more EHR data exposure
+    - Lower fraction → more image-only training
+    
+    OUTPUT:
+        Shuffled list of Stage A + Stage B samples ready for training
+    
+    WHY SHUFFLE:
+    - Model doesn't see patterns (all A before all B)
+    - Forces model to learn both modes together
+    - Prevents overfitting to one stage
+    
+    Args:
+        stage_a_samples: List of Stage A samples (image-only)
+        stage_b_samples: List of Stage B samples (image+EHR)
+        seed: Random seed for reproducibility
+        stage_b_fraction: Fraction of Stage B to include (default 0.65)
+        
+    Returns:
+        Shuffled list of mixed Stage A/B samples
+    """
     rng = random.Random(seed)
     stage_a_block = [copy.deepcopy(s) for s in stage_a_samples]
 
@@ -289,7 +358,30 @@ TASK:
         }
 
     def _build_chexpert_vector(self, chexpert_labels: Dict[str, int]) -> Tuple[List[float], List[float]]:
-        """Build dense target vector and supervision mask for CheXpert labels."""
+        """
+        Build dense target vector and supervision mask for CheXpert labels.
+        
+        WHY THIS IS NEEDED:
+        - Model needs numeric target for training
+        - CheXpert has 3 values: 1 (positive), 0 (negative), -1 (uncertain)
+        - -1 values should NOT be supervised (mask out)
+        - Converts dict to dense vector for loss computation
+        
+        HOW IT WORKS:
+        - For each CheXpert label (12 total):
+          - If value == 1 → target = 1.0, mask = 1.0 (supervise)
+          - If value == 0 → target = 0.0, mask = 1.0 (supervise)
+          - If value == -1 → target = 0.0, mask = 0.0 (don't supervise)
+        
+        RETURNS:
+            (values, mask) where:
+            - values: list of 12 floats (target values)
+            - mask: list of 12 floats (1.0 = supervise, 0.0 = ignore)
+        
+        USAGE:
+            Used in collate_fn to create training targets
+            Mask prevents loss on uncertain labels
+        """
         values: List[float] = []
         mask: List[float] = []
         for label in CHEXPERT_ORDER:
@@ -303,7 +395,33 @@ TASK:
         return values, mask
 
     def _normalize_icd_labels(self, icd_labels: Any) -> Dict[str, int]:
-        """Normalize ICD annotations into a dict keyed by ICD_ORDER with 0/1 values."""
+        """
+        Normalize ICD annotations into standardized 0/1 dictionary
+        
+        WHY THIS IS NEEDED:
+        - ICD codes come in different formats (dict, list, codes)
+        - Need consistent format for training
+        - Converts ICD-10 codes (e.g., "J18.9") to condition names (e.g., "Pneumonia")
+        
+        INPUT FORMATS HANDLED:
+        1. Dict: {"Pneumonia": 1, "Pleural_Effusion": 0}
+        2. List: [{"code": "J18.9", ...}] → maps to "Pneumonia"
+        3. None: Returns all zeros
+        
+        OUTPUT:
+            Dict with 8 ICD conditions (all 0 or 1):
+            - Pneumonia
+            - Pleural_Effusion
+            - Pneumothorax
+            - Pulmonary_Edema
+            - Cardiomegaly
+            - Atelectasis
+            - Pulmonary_Embolism
+            - Rib_Fracture
+        
+        RETURNS:
+            Normalized dict with all ICD conditions (0 or 1 only)
+        """
         normalized = {label: 0 for label in ICD_ORDER}
         if not icd_labels:
             return normalized
@@ -427,7 +545,39 @@ TASK:
 3) ICD: {json.dumps(icd_json)}"""
     
     def create_stratified_sampler(self, rare_boost: float = 5.0) -> WeightedRandomSampler:
-        """Create stratified sampler to boost rare positive labels"""
+        """
+        ⭐ Create stratified sampler to boost rare positive labels
+        
+        WHY THIS IS CRITICAL:
+        - Some diseases are very rare (e.g., Pneumothorax: 3%, Fracture: 2%)
+        - Without boosting, model under-learns rare diseases
+        - Boosting increases sample frequency of rare positives
+        - Improves recall for critical findings (e.g., fractured ribs)
+        
+        RARE LABELS BOOSTED:
+        - CheXpert: Pneumothorax, Fracture, Lung Lesion
+        - ICD: Pulmonary_Embolism, Rib_Fracture, Pneumothorax
+        
+        HOW IT WORKS:
+        1. Assign weight=1.0 to all samples
+        2. If sample has rare positive → multiply weight by rare_boost (default 5.0)
+        3. Example: Sample with Pneumothorax=1 → weight = 1.0 * 5.0 = 5.0
+        4. Normalize weights so they sum to dataset size
+        5. Return WeightedRandomSampler
+        
+        RARE_BOOST PARAMETER:
+        - 1.0 = no boosting (equal sampling)
+        - 3.0 = moderate boosting (rare labels 3x more frequent)
+        - 5.0 = aggressive boosting (rare labels 5x more frequent)
+        - Higher = more focus on rare diseases
+        
+        USAGE:
+            sampler = dataset.create_stratified_sampler(rare_boost=5.0)
+            dataloader = DataLoader(..., sampler=sampler)
+        
+        RETURNS:
+            WeightedRandomSampler ready for DataLoader
+        """
         
         # Rare labels that need boosting
         rare_chexpert = ['Pneumothorax', 'Fracture', 'Lung Lesion']
@@ -462,7 +612,59 @@ TASK:
         )
     
     def collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Collate function that builds multimodal prompts for HF LLaVA processors."""
+        """
+        ⭐ Collate function that builds multimodal prompts for HuggingFace LLaVA processors
+        
+        WHY THIS IS CRITICAL:
+        - LLaVA uses special chat format with images
+        - Need to format: [EHR text] + [Image] + [Prompt] → [Target]
+        - Handles Stage A (no EHR) and Stage B (with EHR) differently
+        - Converts batch of samples into model-ready inputs
+        
+        WHAT IT DOES:
+        1. Takes list of samples (each has image, prompt, target, etc.)
+        2. Extracts images (PIL format)
+        3. Builds chat format for each sample:
+           - User: EHR (if Stage B) + Image + Prompt
+           - Assistant: Target (Impression + CheXpert + ICD)
+        4. Uses processor to tokenize and encode
+        5. Creates labels (only for assistant tokens, rest = -100)
+        
+        CHAT FORMAT:
+        [
+            {"role": "user", "content": [
+                {"type": "text", "text": "EHR: {...}\n"},
+                {"type": "image"},
+                {"type": "text", "text": "Analyze the chest X-ray..."}
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Impression: ...\nCheXpert: {...}"}
+            ]}
+        ]
+        
+        LABEL CREATION:
+        - Labels = -100 for tokens we DON'T want to compute loss on
+        - Labels = actual token IDs for tokens we DO want to compute loss on
+        - Only assistant response tokens have real labels
+        - User prompt tokens are masked out (-100)
+        
+        OUTPUT:
+            Dictionary with:
+            - pixel_values: batched image tensors
+            - input_ids: batched token IDs
+            - attention_mask: batched attention masks
+            - labels: batched training labels (-100 for non-prediction tokens)
+            - chexpert_targets: batched CheXpert target vectors
+            - chexpert_masks: batched CheXpert supervision masks
+            - icd_targets: batched ICD target vectors
+            - icd_masks: batched ICD supervision masks
+        
+        Args:
+            batch: List of sample dictionaries from __getitem__
+            
+        Returns:
+            Batched dictionary ready for model forward pass
+        """
         images = [item['image'] for item in batch]
         targets = [item['target'] for item in batch]
         chexpert_targets = [torch.tensor(item['chexpert_target'], dtype=torch.float32) for item in batch]

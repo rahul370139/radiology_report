@@ -28,11 +28,14 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-# Configuration
-MIMIC_IV_DIR = pl.Path("../../files/mimic-iv-3.1")  # FIXED: Correct path from src/utils/
-CXR_STUDY_LIST = pl.Path("../../files/cxr-study-list.csv")  # FIXED: Correct path from src/utils/
-MANIFEST_FILE = pl.Path("../../data/processed/phaseA_manifest.jsonl")  # FIXED: Correct path from src/utils/
-OUTPUT_FILE = pl.Path("../../data/processed/ehr_context.jsonl")  # FIXED: Correct path from src/utils/
+# Configuration - Use absolute paths based on script location
+import os
+SCRIPT_DIR = pl.Path(__file__).parent.absolute()
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
+MIMIC_IV_DIR = PROJECT_ROOT / "files/mimic-iv-3.1"
+CXR_STUDY_LIST = PROJECT_ROOT / "files/cxr-study-list.csv"
+MANIFEST_FILE = PROJECT_ROOT / "src/data/processed/phaseA_manifest.jsonl"
+OUTPUT_FILE = PROJECT_ROOT / "src/data/processed/ehr_context.jsonl"
 
 # Key lab test itemids for common clinical labs
 KEY_LAB_ITEMIDS = {
@@ -112,13 +115,31 @@ OXYGEN_DEVICE_ITEMIDS = {
 
 def build_vital_item_mapping(conn: duckdb.DuckDBPyConnection) -> Dict[int, str]:
     """
-    Build dynamic itemid mapping from both ICU and hosp d_items tables.
+    ⭐ Build dynamic vital item mapping from MIMIC-IV d_items table
+    
+    WHY THIS IS NEEDED:
+    - MIMIC-IV uses itemids (numeric codes) for each vital sign
+    - Example: 220045 = heart_rate, 220210 = respiratory_rate
+    - Need to map these codes to human-readable names
+    - Different ICU/Ward systems use different itemids for same vital
+    
+    HOW IT WORKS:
+    1. Load d_items.csv.gz (contains all measurement definitions)
+    2. Use regex patterns to match vital names (e.g., "heart.*rate" → heart_rate)
+    3. Build mapping of itemid → standardized vital_code
+    4. Returns dictionary like {220045: "heart_rate", 220210: "respiratory_rate"}
+    
+    WHY DYNAMIC:
+    - Different institutions may use different itemids
+    - Building dynamically ensures we catch all variants
+    - More robust than hardcoding specific itemids
     
     Args:
-        conn: DuckDB connection
+        conn: DuckDB connection to MIMIC-IV database
         
     Returns:
-        Dictionary mapping itemid to standardized vital name
+        Dictionary mapping itemid (int) to standardized vital_code (str)
+        Example: {220045: "heart_rate", 220210: "respiratory_rate"}
     """
     import re
     
@@ -162,7 +183,39 @@ def build_vital_item_mapping(conn: duckdb.DuckDBPyConnection) -> Dict[int, str]:
         }
 
 def initialize_duckdb() -> duckdb.DuckDBPyConnection:
-    """Initialize DuckDB connection and load MIMIC-IV data."""
+    """
+    ⭐ Initialize DuckDB connection and load MIMIC-IV database files
+    
+    WHY DUCKDB:
+    - Fast in-memory database for CSV files
+    - No PostgreSQL setup required (just reads .csv.gz files)
+    - Perfect for analytics queries on large datasets
+    - Handles compressed files (.csv.gz) natively
+    
+    WHAT IT LOADS:
+    1. Hospital data: patients, admissions, diagnoses, labs, vitalsign
+    2. ICU data: chartevents (vitals), d_items (definitions), icustays
+    3. Metadata: d_labitems, d_icd_diagnoses (lookup tables)
+    
+    TABLES LOADED (~15 tables):
+    - patients.csv.gz: Demographics (age, gender)
+    - admissions.csv.gz: Admission details
+    - diagnoses_icd.csv.gz: ICD-10 diagnosis codes
+    - labevents.csv.gz: Laboratory test results
+    - chartevents.csv.gz: ICU vitals (continuous monitoring)
+    - vitalsign.csv.gz: Ward vitals (4-hourly)
+    - omr.csv.gz: Outpatient vitals (clinic visits)
+    - etc.
+    
+    HOW IT WORKS:
+    1. Create in-memory DuckDB database
+    2. Load each .csv.gz file as a table
+    3. Auto-detect column types (or fallback to VARCHAR)
+    4. Return connection for querying
+    
+    RETURNS:
+        DuckDB connection object ready for SQL queries
+    """
     print("🔧 Initializing DuckDB and loading MIMIC-IV data...")
     print("=" * 70)
     
@@ -214,7 +267,34 @@ def initialize_duckdb() -> duckdb.DuckDBPyConnection:
     return conn
 
 def load_study_metadata() -> pd.DataFrame:
-    """Load CXR study metadata with admission times."""
+    """
+    ⭐ Load chest X-ray study metadata
+    
+    WHAT IT DOES:
+    - Loads cxr-study-list.csv (contains study_id, subject_id for each X-ray)
+    - Loads phaseA_manifest.jsonl (contains which studies to use)
+    - Merges them to get subject_id for each study
+    - Returns DataFrame with study_id, subject_id pairs
+    
+    WHY:
+    - Need subject_id to query patient EHR data
+    - Each chest X-ray is linked to a patient (subject_id)
+    - Filters to only studies in the manifest (ones we want to train on)
+    
+    WHAT THE DATA CONTAINS:
+    - study_id: Unique identifier for this chest X-ray
+    - subject_id: Which patient this X-ray belongs to
+    - StudyDate, StudyTime: When the X-ray was taken
+    
+    HOW IT WORKS:
+    1. Read cxr-study-list.csv (all available X-rays)
+    2. Read phaseA_manifest.jsonl (which studies to use)
+    3. Merge on study_id
+    4. Extract subject_id (links to patient data)
+    
+    RETURNS:
+        DataFrame with columns: study_id, subject_id, (optional StudyDate, StudyTime)
+    """
     print("\n📋 Loading CXR study metadata...")
     
     # Load study list
@@ -248,11 +328,40 @@ def load_study_metadata() -> pd.DataFrame:
 
 def find_best_admission_for_study(conn: duckdb.DuckDBPyConnection, subject_id: int, study_id: str) -> Optional[int]:
     """
-    Find the best admission for a CXR study using multiple strategies.
+    ⭐ Find the hospital admission that matches this chest X-ray study
     
-    Since we don't have study dates, we use these fallback strategies:
-    1. Find the most recent admission for this subject
-    2. If no admissions, return None
+    WHY THIS IS CRITICAL:
+    - Chest X-rays are taken during hospital admissions
+    - Need hadm_id (admission ID) to get vitals, labs, diagnoses
+    - X-ray timing may not exactly match admission timing
+    - Need to find the "best" admission for this study
+    
+    STRATEGY:
+    1. Find the most recent admission for this patient
+    2. Assume chest X-ray was taken during that admission
+    3. Fallback: Return None if no admissions found
+    
+    LIMITATIONS:
+    - We don't have exact study dates for all X-rays
+    - May not match the X-ray timing exactly
+    - But "most recent" is usually correct for emergency/urgent X-rays
+    
+    WHAT IT RETURNS:
+    - hadm_id (int): Hospital admission ID
+    - None: If no admission found for this patient
+    
+    HOW IT'S USED:
+    - Used to query vitals from admissions table
+    - Used to query labs from labevents (filtered by hadm_id)
+    - Used to query diagnoses from diagnoses_icd
+    
+    Args:
+        conn: DuckDB connection
+        subject_id: Patient ID
+        study_id: Chest X-ray study ID
+        
+    Returns:
+        hadm_id if found, None otherwise
     """
     try:
         # Strategy 1: Find the most recent admission for this subject
@@ -283,17 +392,45 @@ def extract_comprehensive_vitals(
     vital_item_map: Optional[Dict[int, str]] = None
 ) -> Dict[str, Any]:
     """
-    Extract comprehensive vital signs from ICU chartevents + OMR with improved coverage.
+    ⭐ CRITICAL FUNCTION: Extract comprehensive vital signs from ICU chartevents + OMR
+    
+    WHY THIS MATTERS: 
+    - Vital signs are essential EHR data for radiology context
+    - Heart rate, blood pressure, O2 saturation help interpret chest X-rays
+    - Example: Patient with low O2 saturation on X-ray → likely pneumonia
+    
+    WHAT IT DOES:
+    1. Queries chartevents table for ICU vitals (high-resolution, continuous monitoring)
+    2. Queries vitalsign table for ward vitals (4-hourly floor vitals)
+    3. Queries OMR table for outpatient vitals (clinic visits, height/weight)
+    4. Applies sanity checks (filters impossible values like HR=0)
+    5. Temporally aligns data (7-day window before chest X-ray)
+    
+    DATA SOURCES:
+    - chartevents: Real-time ICU monitoring (every few minutes)
+    - vitalsign: Floor ward measurements (every 4 hours)
+    - omr: Outpatient clinic visits (sparse, periodic)
+    
+    MEDICAL ACCURACY:
+    - Validates ranges (e.g., SpO2 must be 0-100%, HR 20-300 bpm)
+    - Prevents impossible values (respiratory rate cannot be 0)
+    - Distinguishes sources (ICU vs Ward vs OMR)
     
     Args:
-        conn: DuckDB connection
-        subject_id: Patient subject ID
-        hadm_id: Hospital admission ID
-        study_time: Time of the chest X-ray study
-        vital_item_map: Dynamic itemid mapping
+        conn: DuckDB connection to MIMIC-IV database
+        subject_id: Patient subject ID (unique identifier)
+        hadm_id: Hospital admission ID (for temporal alignment)
+        study_time: Time of the chest X-ray (for temporal window)
+        vital_item_map: Mapping of itemids to vital codes (e.g., 220045 → heart_rate)
         
     Returns:
-        Dictionary with comprehensive vital signs data
+        Dictionary with comprehensive vital signs data like:
+        {
+            "heart_rate": {"value": 85, "unit": "bpm", "time": "...", "source": "ICU"},
+            "bp_systolic": {"value": 120, "unit": "mmHg", ...},
+            "respiratory_rate": {...},
+            ...
+        }
     """
     vitals = {}
     
@@ -497,9 +634,9 @@ def extract_comprehensive_vitals(
             weight_kg = vitals["weight"]["value"]
             height_cm = vitals["height"]["value"]
             
-            # Convert height to cm if needed (assuming inches if < 3)
+            # Convert height to cm if needed (assuming feet if < 3)
             if height_cm < 3:
-                height_cm = height_cm * 2.54
+                height_cm = height_cm * 30.48
             
             if height_cm > 0:
                 bmi = weight_kg / ((height_cm / 100) ** 2)
@@ -535,16 +672,48 @@ def extract_comprehensive_labs(
     study_time: Optional[datetime] = None
 ) -> Dict[str, Any]:
     """
-    Extract comprehensive laboratory data from labevents.
+    ⭐ CRITICAL FUNCTION: Extract comprehensive laboratory data from MIMIC-IV labevents
+    
+    WHY THIS MATTERS:
+    - Lab values are crucial clinical context for interpreting chest X-rays
+    - Example: High white blood cell count + infiltrate on X-ray → bacterial pneumonia
+    - Example: Elevated BNP + pulmonary edema on X-ray → heart failure
+    
+    WHAT IT DOES:
+    1. Queries labevents table for blood tests and chemistry panels
+    2. Filters to key lab tests (WBC, hematocrit, sodium, creatinine, troponin, etc.)
+    3. Applies unit conversions (mg/dL ↔ mg/L, M/uL ↔ K/uL)
+    4. Removes sentinel values (-9999, -1) and unit mismatches
+    5. Stores most recent value per lab test (within 48-hour window)
+    
+    KEY LAB TESTS (20 most important):
+    - WBC Count (white blood cells) → infection indicator
+    - Hematocrit, Hemoglobin → blood loss indicator
+    - Sodium, Creatinine, BUN → kidney function
+    - Troponin → heart damage indicator
+    - BNP → heart failure indicator
+    - Lactate → tissue hypoxia indicator
+    - Procalcitonin, CRP → infection/inflammation markers
+    
+    MEDICAL ACCURACY:
+    - Unit sanity checks (BNP should be pg/mL, not mg/dL)
+    - Unit conversions (Platelet count M/uL → K/uL)
+    - Reference ranges (flags abnormal values)
+    - Most recent value capture (clinical relevance)
     
     Args:
-        conn: DuckDB connection
+        conn: DuckDB connection to MIMIC-IV database
         subject_id: Patient subject ID
-        hadm_id: Hospital admission ID
-        study_time: Time of the chest X-ray study
+        hadm_id: Hospital admission ID (for temporal alignment)
+        study_time: Time of the chest X-ray (for 48-hour window)
         
     Returns:
-        Dictionary with comprehensive laboratory data
+        Dictionary with laboratory data like:
+        {
+            "WBC Count": {"value": 7.5, "unit": "K/uL", "flag": "NORMAL", ...},
+            "Hematocrit": {"value": 38.2, "unit": "%", ...},
+            ...
+        }
     """
     labs = {}
     
@@ -664,7 +833,20 @@ def extract_oxygen_device(
     study_time: Optional[datetime] = None
 ) -> Optional[str]:
     """
-    Extract oxygen device information from chartevents.
+    ⭐ Extract oxygen device information from chartevents
+    
+    WHY THIS MATTERS:
+    - Oxygen device indicates respiratory support needs
+    - Example: Patient on ventilator → likely in ICU, critically ill
+    - Example: Patient on nasal cannula → mild respiratory support
+    - Helps interpret chest X-rays (why was this patient imaged?)
+    
+    DEVICE TYPES:
+    - Ventilator: Maximum support (intubated patient)
+    - Non-rebreather: High flow oxygen mask
+    - High-flow nasal cannula: Advanced oxygen delivery
+    - Nasal cannula: Low-flow oxygen delivery
+    - Room air: No oxygen support
     
     Args:
         conn: DuckDB connection
@@ -673,7 +855,7 @@ def extract_oxygen_device(
         study_time: Time of the chest X-ray study
         
     Returns:
-        String describing oxygen device or None
+        String describing oxygen device or None (e.g., "Ventilator: 100%", "Nasal cannula: 2L/min")
     """
     try:
         # Build time window for oxygen device
@@ -721,7 +903,33 @@ def extract_icd_flags(
     hadm_id: Optional[int]
 ) -> Dict[str, bool]:
     """
-    Extract ICD diagnosis flags for both acute and chronic conditions.
+    ⭐ Extract ICD-10 diagnosis flags for acute and chronic conditions
+    
+    WHY THIS MATTERS:
+    - Chronic conditions affect how we interpret imaging findings
+    - Example: COPD patient → expect emphysema/chronic changes on X-ray
+    - Example: Diabetic patient → higher risk of infections
+    - Example: Heart failure → correlates with pulmonary edema on X-ray
+    
+    ACUTE CONDITIONS (8 conditions):
+    - Pneumonia (J18.x)
+    - Pleural_Effusion (J90)
+    - Pneumothorax (J93.x)
+    - Pulmonary_Embolism (I26.x)
+    - CHF_exacerbation (I50.x)
+    - Pulmonary_Edema (J81.0)
+    - Rib_Fracture (S22.x)
+    - Lung_mass (C34, R91)
+    
+    CHRONIC CONDITIONS (8 comorbidities):
+    - Diabetes (E10-E14)
+    - COPD (J44.x)
+    - Chronic Kidney Disease (N18.x)
+    - Hypertension (I10-I15)
+    - Coronary Artery Disease (I25.x)
+    - Atrial Fibrillation (I48.x)
+    - Stroke (I63-I69)
+    - Liver Disease (K70-K77)
     
     Args:
         conn: DuckDB connection
@@ -730,6 +938,7 @@ def extract_icd_flags(
         
     Returns:
         Dictionary with boolean flags for each condition
+        Example: {"pneumonia": True, "diabetes": True, "copd": False, ...}
     """
     # Acute ICD codes for pulmonary conditions
     ACUTE_ICD_CODES = {
@@ -811,16 +1020,63 @@ def extract_ehr_for_study(
     vital_item_map: Optional[Dict[int, str]] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Extract comprehensive EHR data for a specific study.
+    ⭐ MAIN ORCHESTRATOR: Extract complete EHR data for one chest X-ray study
+    
+    WHAT IT DOES:
+    - Orchestrates the entire EHR extraction process
+    - Calls all the individual extraction functions
+    - Combines data from multiple sources into one EHR record
+    - This is THE function that creates the final EHR context
+    
+    DATA SOURCES COMBINED:
+    1. Patient demographics (age, sex) → from patients table
+    2. Vital signs → from extract_comprehensive_vitals()
+    3. Laboratory tests → from extract_comprehensive_labs()
+    4. Oxygen devices → from extract_oxygen_device()
+    5. ICD diagnoses → from extract_icd_flags()
+    6. Chronic conditions → derived from ICD flags
+    
+    OUTPUT STRUCTURE:
+    {
+        "study_id": "123456",
+        "subject_id": 10000032,
+        "ehr_json": {
+            "Age": 65,
+            "Sex": "M",
+            "hadm_id": 54321,
+            "admission_type": "EMERGENCY",
+            "Vitals": {...},
+            "Labs": {...},
+            "O2_device": "Nasal_cannula: 2L/min",
+            "Chronic_conditions": ["diabetes", "hypertension"]
+        },
+        "icd_json": {
+            "pneumonia": False,
+            "diabetes": True,
+            ...
+        }
+    }
+    
+    TEMPORAL ALIGNMENT:
+    - Uses study_time to align vitals/labs near the X-ray
+    - 7-day window for vitals (before X-ray)
+    - 48-hour window for labs (before X-ray)
+    - 24-hour window for oxygen devices
+    
+    WHY THIS FUNCTION MATTERS:
+    - This is where all EHR data comes together
+    - Output is used to create Stage B training samples
+    - Without this, there's no patient context for the model
     
     Args:
         conn: DuckDB connection
-        subject_id: Patient subject ID
-        study_id: Study ID
-        study_time: Time of the chest X-ray study
+        subject_id: Patient ID
+        study_id: Chest X-ray study ID
+        study_time: When the X-ray was taken (for temporal alignment)
+        vital_item_map: Mapping of itemids to vital names
         
     Returns:
-        Dictionary with comprehensive EHR data or None if not available
+        Complete EHR record or None if patient not found
     """
     try:
         # Get patient demographics
@@ -901,7 +1157,46 @@ def extract_ehr_for_study(
         return None
 
 def build_enhanced_ehr_context() -> None:
-    """Build enhanced EHR context for all studies."""
+    """
+    ⭐ MAIN FUNCTION: Build EHR context for all chest X-ray studies
+    
+    WHAT IT DOES:
+    - Processes ALL chest X-ray studies in the dataset
+    - Extracts comprehensive EHR data for each study
+    - Writes to ehr_context.jsonl (one line per study)
+    
+    PROCESS:
+    1. Initialize DuckDB and load MIMIC-IV tables
+    2. Build vital item mapping (itemid → vital name)
+    3. Load study metadata (study_id, subject_id pairs)
+    4. For each study:
+       - Extract EHR data (vitals, labs, devices, ICD codes)
+       - Write to output file
+    5. Print summary statistics
+    
+    OUTPUT:
+    - File: src/data/processed/ehr_context.jsonl
+    - Format: JSONL (one JSON object per line)
+    - Records: ~5,441 studies with EHR data
+    
+    STATISTICS SHOWN:
+    - Records processed
+    - Records with vitals (%)
+    - Records with labs (%)
+    - Records with ICD flags (%)
+    - Vitals/Labs coverage by type
+    
+    RUNTIME:
+    - ~2-4 hours for full dataset
+    - Processes ~5,441 studies
+    - Extracts data from multiple MIMIC-IV tables
+    
+    WHY IT'S SLOW:
+    - Querying multiple large tables (labevents, chartevents)
+    - Temporal alignment (finding data near X-ray time)
+    - Unit conversions and sanity checks
+    - Deduplication and quality checks
+    """
     print("🏥 BUILDING ENHANCED EHR CONTEXT")
     print("=" * 70)
     print("✅ Using comprehensive MIMIC-IV data sources:")
@@ -1015,7 +1310,40 @@ def build_enhanced_ehr_context() -> None:
     print(f"Output saved to: {OUTPUT_FILE}")
 
 def analyze_enhanced_ehr_context() -> None:
-    """Analyze the generated enhanced EHR context."""
+    """
+    ⭐ Analyze the generated EHR context file
+    
+    WHAT IT DOES:
+    - Reads the ehr_context.jsonl file
+    - Computes statistics on data coverage
+    - Shows demographics, vitals, labs, ICD distribution
+    
+    STATISTICS COMPUTED:
+    - Age distribution: Mean, min, max
+    - Sex distribution: Male vs Female %
+    - Vitals coverage: Which vitals are most common
+    - Labs coverage: Which lab tests are most common
+    - ICD flags: Which diagnoses are most frequent
+    - Oxygen devices: How many patients on respiratory support
+    - Admission data: How many have admission info
+    
+    WHY IT'S IMPORTANT:
+    - Validates data quality
+    - Shows coverage gaps (e.g., only 42% have vitals)
+    - Identifies most common findings
+    - Helps understand dataset characteristics
+    
+    OUTPUT EXAMPLE:
+    - "93.6% have Creatinine lab"
+    - "42.1% have weight vital"
+    - "34.8% have hypertension"
+    - "26.3% have oxygen device"
+    
+    HELPS WITH:
+    - Understanding Stage B coverage (which samples have EHR data)
+    - Identifying rare findings that need boosting
+    - Validating data extraction worked correctly
+    """
     print(f"\n📊 ANALYZING ENHANCED EHR CONTEXT")
     print("=" * 70)
     

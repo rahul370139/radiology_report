@@ -1,8 +1,38 @@
 #!/usr/bin/env python3
 """
-Advanced Trainer for MIMIC-CXR Radiology Report Model
-Implements curriculum learning, class balancing, JSON drift prevention, and early stopping
-AGGRESSIVE MPS OPTIMIZATION - NO CPU FALLBACK!
+⭐ ADVANCED TRAINER: Main training script for LLaVA v1.6 fine-tuning on A100 GPU
+
+WHAT IT DOES:
+- Fine-tunes LLaVA v1.6 model with LoRA (Low-Rank Adaptation)
+- Implements curriculum learning (Stage A → Stage B progression)
+- Handles class balancing for rare positive labels
+- Prevents JSON drift (ensures valid output format)
+- Saves checkpoints at steps 50, 100, and final
+
+WHY THIS IS CRITICAL:
+- This is the script that trains the actual model on A100 GPU
+- LoRA allows efficient fine-tuning (only 41.9M trainable parameters vs 7.28B total)
+- Curriculum learning: Start with image-only (Stage A), then add EHR (Stage B)
+- Class balancing: Boosts rare positives like "Support Devices", "Rib Fracture"
+
+TRAINING FLOW:
+1. Load base model: microsoft/llava-1.6-mistral-7b
+2. Apply LoRA adapters to attention layers (q, k, v, o, gate, up, down)
+3. Freeze vision backbone (keep visual encoder frozen)
+4. Unfreeze projector (vision→text mapping needs training)
+5. Stage A: 959 samples (image-only) → Impression + CheXpert
+6. Stage B: 3,988 samples (image+EHR) → Adds ICD codes
+7. Save checkpoints every 50 steps
+
+CONFIGURATION:
+See configs/advanced_training_config.yaml for hyperparameters:
+- LoRA rank: 8, alpha: 16 (memory efficient)
+- Batch size: 1 per device, gradient accumulation: 32
+- Learning rate: 5e-5 (Stage A), 3e-5 (Stage B)
+- Epochs: 2 (optimal for LoRA convergence)
+
+IMPORTANT NOTE:
+Model was trained on A100 GPU but needs to run on CPU for deployment (challenge).
 """
 
 # Apply accelerator compatibility patch first
@@ -1015,6 +1045,12 @@ class AdvancedRadiologyTrainer:
                 merged = self.model.merge_and_unload()
                 merged.save_pretrained(final_merged)
                 self.tokenizer.save_pretrained(final_merged)
+                # IMPORTANT: Also save the processor
+                if self.processor:
+                    self.processor.save_pretrained(final_merged)
+                    logger.info(f"✅ Saved processor to {final_merged}")
+                else:
+                    logger.warning("No processor to save")
         except Exception as e:
             logger.warning(f"Skipping merged save due to: {e}")
         logger.info("=" * 70)

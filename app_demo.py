@@ -21,9 +21,10 @@ from inference.pipeline import generate, get_pipeline, ICD
 # Default runtime parameters for demo (can be overridden via env)
 _STREAMLIT_DEFAULT_ENV = {
     "USE_MERGED_WEIGHTS": "true",
-    "MERGED_WEIGHTS_PATH": "checkpoints/merged/main_merged",
-    "CHEXPERT_VOTE": "1",
-    "ICD_VOTE": "1",
+    "MERGED_WEIGHTS_PATH": "./radiology_checkpoints/merged/main_merged_v16",  # Use v16 model
+    "USE_8BIT_QUANTIZATION": "false",  # Disabled on CPU/MPS
+    "CHEXPERT_VOTE": "1",  # Reduced for faster demo
+    "ICD_VOTE": "1",  # Reduced for faster demo
     "CHEXPERT_POSITIVE_BIAS": "4.0",
     "CHEXPERT_NEGATIVE_BIAS": "-0.5",
     "ICD_POSITIVE_BIAS": "4.0",
@@ -32,14 +33,26 @@ _STREAMLIT_DEFAULT_ENV = {
     "ICD_DO_SAMPLE": "true",
     "CHEXPERT_TEMPERATURE": "0.75",
     "ICD_TEMPERATURE": "0.75",
-    "CHEXPERT_MAX_NEW_TOKENS": "140",
-    "ICD_MAX_NEW_TOKENS": "100",
-    "IMP_MAX_NEW_TOKENS": "120",
+    "CHEXPERT_MAX_NEW_TOKENS": "64",  # Optimize for speed
+    "ICD_MAX_NEW_TOKENS": "64",  # Optimize for speed
+    "IMP_MAX_NEW_TOKENS": "64",  # Optimize for speed
     "ENABLE_LABEL_KEYWORDS": "true",
+    "GEN_MAX_NEW_TOKENS": "64",  # Optimize for speed
+    "GEN_TEMPERATURE": "0.1",  # Lower temperature for faster generation
 }
 
 for key, value in _STREAMLIT_DEFAULT_ENV.items():
     os.environ.setdefault(key, value)
+
+# Cached model loading - load once, reuse many times
+@st.cache_resource
+def load_model_pipeline():
+    """Load the model pipeline once and cache it for all requests."""
+    device = "cpu"  # Force CPU for the 14GB model
+    print(f"🔄 Loading model on {device}...")
+    pipeline = get_pipeline(device=device)
+    print("✅ Model loaded successfully!")
+    return pipeline
 
 # Page config
 st.set_page_config(
@@ -182,8 +195,8 @@ def main():
     # Sidebar
     st.sidebar.header("🎛️ Controls")
     
-    # Device selection
-    device = st.sidebar.selectbox("Select Device", ["cpu", "cuda", "mps"], index=0)
+    # Device info (model always runs on CPU for 14GB model)
+    st.sidebar.info("💻 **Device**: CPU (required for 14GB model)")
     
     # Input mode selection
     input_mode = st.sidebar.radio("Input Mode", ["📁 Use Demo Samples", "📤 Upload Your Image"], index=0)
@@ -290,13 +303,16 @@ def main():
         if st.button("🚀 Generate Report", type="primary"):
             with st.spinner("Generating radiology report..."):
                 try:
+                    # Load the cached pipeline (loads once, reuses many times)
+                    pipeline = load_model_pipeline()
+                    
                     if is_stage_b:
                         start_a = time.time()
-                        result_image_only = generate(image_path, None, device=device)
+                        result_image_only = pipeline.generate(image_path, None)
                         time_a = time.time() - start_a
 
                         start_b = time.time()
-                        result_with_ehr = generate(image_path, ehr_data, device=device)
+                        result_with_ehr = pipeline.generate(image_path, ehr_data)
                         time_b = time.time() - start_b
 
                         col_pred_a, col_pred_b = st.columns(2)
@@ -306,7 +322,7 @@ def main():
                                 title="Demo A · Image Only",
                                 show_icd=True,
                                 generation_time=time_a,
-                                device=device,
+                                device="cpu",
                             )
                         with col_pred_b:
                             render_prediction(
@@ -314,7 +330,7 @@ def main():
                                 title="Demo B · Image + EHR",
                                 show_icd=True,
                                 generation_time=time_b,
-                                device=device,
+                                device="cpu",
                             )
 
                         # Highlight ICD deltas
@@ -332,14 +348,14 @@ def main():
                                 st.write("No change in ICD predictions between the two runs.")
                     else:
                         start_time = time.time()
-                        result = generate(image_path, None, device=device)
+                        result = pipeline.generate(image_path, None)
                         generation_time = time.time() - start_time
                         render_prediction(
                             result,
                             title="Demo A · Image Only",
                             show_icd=False,
                             generation_time=generation_time,
-                            device=device,
+                            device="cpu",
                         )
 
                 except Exception as e:

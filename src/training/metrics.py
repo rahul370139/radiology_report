@@ -22,10 +22,42 @@ logger = logging.getLogger(__name__)
 
 
 class MetricsCalculator:
-    """Calculate evaluation metrics for radiology reports."""
+    """
+    ⭐ Calculate evaluation metrics for radiology report generation
+    
+    WHAT IT DOES:
+    - Computes text quality metrics (BLEU-4, ROUGE-L) for impression
+    - Computes classification metrics (F1) for CheXpert and ICD
+    - Checks JSON validity (ensures model outputs parsable JSON)
+    - Provides comprehensive evaluation of model performance
+    
+    METRICS COMPUTED:
+    1. BLEU-4: n-gram overlap between predicted and reference impression
+    2. ROUGE-L: Longest common subsequence (sentence-level similarity)
+    3. CheXpert F1: Per-label F1 and macro-F1 (disease detection accuracy)
+    4. ICD F1: Per-condition F1 and macro-F1 (diagnosis accuracy)
+    5. JSON Validity: % of outputs with valid CheXpert and ICD JSON
+    
+    WHY EACH METRIC MATTERS:
+    - BLEU-4: Measures impression quality (how similar to reference)
+    - ROUGE-L: Measures semantic similarity (how well it captures meaning)
+    - F1: Measures label accuracy (did model predict disease correctly?)
+    - JSON Validity: Ensures model output is actually usable
+    
+    USAGE:
+        calculator = MetricsCalculator()
+        metrics = calculator.compute_all_metrics(predictions, references)
+        # Returns: {'bleu4': 0.42, 'rouge_l': 0.38, 'chexpert_f1': {...}, ...}
+    """
     
     def __init__(self):
-        """Initialize metrics calculator."""
+        """
+        Initialize metrics calculator.
+        
+        DEFINES LABEL SETS:
+        - chexpert_labels: 12 CheXpert findings (Pneumonia, Edema, etc.)
+        - icd_conditions: 8 ICD-10 conditions for Stage B evaluation
+        """
         self.chexpert_labels = [
             'Consolidation', 'Edema', 'Enlarged Cardiomediastinum', 'Fracture',
             'Lung Lesion', 'Lung Opacity', 'No Finding', 'Pleural Effusion',
@@ -38,7 +70,22 @@ class MetricsCalculator:
         ]
     
     def extract_impression(self, text: str) -> str:
-        """Extract impression text from generated output."""
+        """
+        Extract impression text from generated output.
+        
+        WHY THIS IS NEEDED:
+        - Model outputs full report (Impression, CheXpert, ICD)
+        - Need to extract just the "Impression:" part for evaluation
+        - Handles cases where model adds extra text before/after
+        
+        HOW IT WORKS:
+        - Uses regex to find "Impression: ..." until next section
+        - Captures text between "Impression:" and "CheXpert:" or end
+        - Strips whitespace and returns clean impression
+        
+        RETURNS:
+            Just the impression paragraph (clinical findings summary)
+        """
         # Pattern: "Impression: <text>"
         match = re.search(r'Impression:\s*(.*?)(?:\n\n|\nCheXpert:|$)', text, re.DOTALL | re.IGNORECASE)
         if match:
@@ -71,14 +118,36 @@ class MetricsCalculator:
     
     def compute_bleu4(self, predictions: List[str], references: List[str]) -> float:
         """
-        Compute BLEU-4 score.
+        Compute BLEU-4 score for impression quality.
+        
+        WHY BLEU-4:
+        - Standard metric for text generation quality
+        - Measures n-gram overlap (how many word sequences match)
+        - BLEU-4 = unigram, bigram, trigram, 4-gram overlap
+        - Higher score = more similar to reference
+        
+        HOW IT WORKS:
+        1. Tokenize predictions and references
+        2. Count n-gram matches (1-4 grams)
+        3. Compute precision for each n (overlap / total n-grams)
+        4. Take geometric mean of precisions
+        5. Apply brevity penalty (penalize if too short)
+        
+        SCORE INTERPRETATION:
+        - 0.0 = No overlap (completely different)
+        - 1.0 = Perfect match (identical to reference)
+        - 0.3-0.5 = Good quality
+        - 0.5-0.7 = Very good quality
+        
+        USAGE:
+            Used to evaluate impression quality during validation
         
         Args:
             predictions: List of predicted impressions
-            references: List of reference impressions
+            references: List of reference impressions (ground truth)
             
         Returns:
-            BLEU-4 score
+            BLEU-4 score (0.0 to 1.0)
         """
         try:
             from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
@@ -107,14 +176,37 @@ class MetricsCalculator:
     
     def compute_rouge_l(self, predictions: List[str], references: List[str]) -> float:
         """
-        Compute ROUGE-L score.
+        Compute ROUGE-L score for impression quality.
+        
+        WHY ROUGE-L:
+        - Measures longest common subsequence (semantic similarity)
+        - Better than BLEU for capturing meaning (not just word order)
+        - Punishes missing important phrases (recall-oriented)
+        - Standard for summarization tasks
+        
+        HOW IT WORKS:
+        - Finds longest sequence of words that appears in both texts
+        - Computes precision: LCS length / predicted length
+        - Computes recall: LCS length / reference length
+        - Computes F1: harmonic mean of precision and recall
+        
+        ADVANTAGES OVER BLEU:
+        - Captures meaning, not just word order
+        - Better for clinical text (same meaning, different words)
+        - More forgiving of synonyms and rephrasing
+        
+        SCORE INTERPRETATION:
+        - 0.0 = No common phrases
+        - 1.0 = Perfect semantic match
+        - 0.3-0.5 = Good quality
+        - 0.5-0.7 = Very good quality
         
         Args:
             predictions: List of predicted impressions
             references: List of reference impressions
             
         Returns:
-            ROUGE-L F1 score
+            ROUGE-L F1 score (0.0 to 1.0)
         """
         try:
             from rouge import Rouge
@@ -133,14 +225,42 @@ class MetricsCalculator:
         references: List[Dict[str, str]]
     ) -> Dict[str, float]:
         """
-        Compute CheXpert macro-F1 score.
+        Compute CheXpert macro-F1 score for disease detection.
+        
+        WHY THIS IS IMPORTANT:
+        - CheXpert labels are critical (pneumonia, edema, etc.)
+        - Need to measure how well model detects diseases
+        - F1 = harmonic mean of precision and recall
+        - Per-label F1 shows which diseases model is best/worst at
+        
+        HOW IT WORKS:
+        - For each CheXpert label (12 total):
+          1. Convert predictions to binary (1 if positive, else 0)
+          2. Compute F1 score for that label
+          3. Store in results
+        - Computes macro-average F1 (mean of all per-label F1s)
+        
+        CHEXPERT VALUES HANDLED:
+        - "Positive": 1 → supervise loss, count as positive
+        - "Negative": 0 → supervise loss, count as negative
+        - "Uncertain": -1 → DO NOT supervise loss (mask out)
+        
+        RETURNS:
+            Dict with:
+            - Per-label F1 (e.g., "Pneumonia": 0.87)
+            - "macro_avg": overall F1 across all labels
+        
+        INTERPRETATION:
+        - macro_avg > 0.7 = good
+        - macro_avg > 0.8 = very good
+        - Some labels may be low (rare diseases)
         
         Args:
-            predictions: List of predicted CheXpert label dicts
-            references: List of reference CheXpert label dicts
+            predictions: List of predicted CheXpert dicts
+            references: List of ground truth CheXpert dicts
             
         Returns:
-            Dictionary with F1 scores
+            Dict with per-label F1 and macro_avg
         """
         # Convert to binary arrays
         label_to_int = {'Positive': 1, 'Negative': 0, 'Uncertain': -1}
